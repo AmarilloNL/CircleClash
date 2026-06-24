@@ -236,26 +236,30 @@ repository's license. *(Add your own `LICENSE` file — MIT is a common choice.)
 
 ## For maintainers — building the apps
 
-A ready-to-use GitHub Actions workflow is included at `.github/workflows/build.yml`. It builds
-standalone **Windows** and **Linux** apps with [PyInstaller](https://pyinstaller.org/) and attaches
-them to the GitHub Release. To cut a release:
+A ready-to-use GitHub Actions workflow is included at `.github/workflows/build.yml`. It builds a
+**single-file** [PyInstaller](https://pyinstaller.org/) executable for **Windows** and **Linux** and
+attaches them to the GitHub Release. To cut a release:
 
 ```bash
 git tag v1.0.0
 git push origin v1.0.0
 ```
 
-The workflow then produces `CircleClash-windows.zip` and `CircleClash-linux.zip` and uploads them to
-the release for that tag. You can also trigger a test build manually from the **Actions** tab.
+The workflow then produces `CircleClash-windows.exe` and `CircleClash-linux` (one file each) and
+uploads them to the release for that tag. You can also trigger a test build manually from the
+**Actions** tab.
 
 How the packaging works (worth knowing if you tweak it):
 
 - **One executable, two roles.** The GUI relaunches itself with `--run-pipeline` to do the actual
   render, so a single PyInstaller build is both the app and its render worker.
-- **Chromium is bundled.** The overlay/results card is rendered with Playwright's Chromium, which is
-  installed with `PLAYWRIGHT_BROWSERS_PATH=0` and collected via `--collect-all playwright`; the frozen
-  app sets the same variable so it loads the bundled browser. This makes the download large
-  (~300-400 MB) but fully self-contained. *(If you ever want a smaller build, the alternative is to
+- **Single file (`--onefile`).** Convenient to share, but the exe unpacks to a temp folder on launch;
+  because of the self-relaunch above, that happens once for the GUI and again for each render, adding
+  a few seconds on top of a large (~300-400 MB) bundle. If startup ever feels too slow, switch the
+  workflow to `--onedir` (a folder you zip) — it doesn't unpack on launch.
+- **Chromium is bundled.** The overlay/results card is rendered with Playwright's Chromium, installed
+  with `PLAYWRIGHT_BROWSERS_PATH=0` and collected via `--collect-all playwright`; the frozen app sets
+  the same variable so it loads the bundled browser. *(For a much smaller build, the alternative is to
   render the overlay with Qt/Pillow instead of HTML and drop Chromium entirely.)*
 - **ffmpeg and danser are not bundled** — danser is auto-fetched on first run; ffmpeg stays a
   documented prerequisite.

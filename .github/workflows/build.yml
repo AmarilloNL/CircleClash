@@ -1,5 +1,5 @@
-# Builds CircleClash into standalone Windows + Linux apps with PyInstaller and
-# attaches them to the GitHub Release.
+# Builds CircleClash into a SINGLE-FILE app for Windows + Linux with PyInstaller
+# and attaches the executables to the GitHub Release.
 #
 # Trigger it by pushing a version tag:
 #     git tag v1.0.0
@@ -7,11 +7,13 @@
 # or run it by hand from the Actions tab ("Run workflow").
 #
 # Notes:
+#  - Output is ONE file per OS: CircleClash-windows.exe and CircleClash-linux.
 #  - ffmpeg is NOT bundled. Users must have ffmpeg on their PATH (see the README).
 #  - danser-go is NOT bundled; the app downloads it on first run.
 #  - Chromium (for the overlay) IS bundled via Playwright + --collect-all, using
 #    PLAYWRIGHT_BROWSERS_PATH=0 so it lives inside the packaged app. This makes the
-#    build large (~300-400 MB) but fully self-contained.
+#    file large (~300-400 MB); because --onefile unpacks to a temp dir on launch,
+#    first start (and each render) takes a few extra seconds.
 
 name: build
 
@@ -32,9 +34,11 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            artifact: CircleClash-windows
+            built: dist/CircleClash.exe
+            asset: CircleClash-windows.exe
           - os: ubuntu-latest
-            artifact: CircleClash-linux
+            built: dist/CircleClash
+            asset: CircleClash-linux
 
     steps:
       - name: Check out the code
@@ -56,11 +60,11 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: '0'   # install inside the playwright package so PyInstaller can collect it
         run: python -m playwright install chromium
 
-      - name: Build with PyInstaller
+      - name: Build single-file executable
         env:
           PLAYWRIGHT_BROWSERS_PATH: '0'
         run: >
-          pyinstaller --noconfirm --clean --windowed
+          pyinstaller --noconfirm --clean --onefile --windowed
           --name CircleClash
           --collect-all playwright
           renderer_gui.py
@@ -68,24 +72,22 @@ jobs:
         # the other modules are picked up automatically because renderer_gui imports
         # make_overlay_video in its --run-pipeline branch.
 
-      - name: Package (Linux)
+      - name: Rename to a release-friendly name (Linux)
         if: runner.os == 'Linux'
-        run: |
-          cd dist
-          zip -r "../${{ matrix.artifact }}.zip" CircleClash
+        run: mv "${{ matrix.built }}" "${{ matrix.asset }}"
 
-      - name: Package (Windows)
+      - name: Rename to a release-friendly name (Windows)
         if: runner.os == 'Windows'
-        run: Compress-Archive -Path dist/CircleClash -DestinationPath ${{ matrix.artifact }}.zip
+        run: Move-Item "${{ matrix.built }}" "${{ matrix.asset }}"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.zip
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
 
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.artifact }}.zip
+          files: ${{ matrix.asset }}
