@@ -511,7 +511,8 @@ class SettingsDialog(QDialog):
 
         # --- header band ---
         header = QWidget()
-        header.setStyleSheet(f"background:{INK2};border-bottom:1px solid {LINE};")
+        header.setObjectName("dlgHeader")
+        header.setStyleSheet(f"#dlgHeader{{background:{INK2};border-bottom:1px solid {LINE};}}")
         hl = QVBoxLayout(header); hl.setContentsMargins(24, 18, 24, 16); hl.setSpacing(3)
         ht = QLabel("Settings")
         htf = QFont(); htf.setFamilies(["Exo 2", "Inter", "Segoe UI", "sans-serif"])
@@ -616,7 +617,8 @@ class SettingsDialog(QDialog):
 
         # --- footer band ---
         footer = QWidget()
-        footer.setStyleSheet(f"background:{INK2};border-top:1px solid {LINE};")
+        footer.setObjectName("dlgFooter")
+        footer.setStyleSheet(f"#dlgFooter{{background:{INK2};border-top:1px solid {LINE};}}")
         fl = QHBoxLayout(footer); fl.setContentsMargins(24, 12, 24, 12)
         cancel = QPushButton("Cancel"); cancel.clicked.connect(self.reject)
         ok = QPushButton("Save"); ok.setProperty("role", "primary"); ok.clicked.connect(self.accept)
@@ -911,8 +913,11 @@ class MainWindow(QMainWindow):
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setVisible(False)
         self.log.setMaximumBlockCount(4000)
         self.log.setObjectName("logview")
-        self.log.setMinimumHeight(200)
-        root.addWidget(self.log)
+        self.log.setMinimumHeight(160)
+        root.addWidget(self.log, 1)            # expands to fill when visible
+        root.addStretch(1)                     # absorbs slack when the log is hidden
+        self._root = root
+        self._tail_idx = root.count() - 1      # index of the trailing stretch
 
         self.resize(760, 640)
         self._refresh_enabled()
@@ -925,6 +930,15 @@ class MainWindow(QMainWindow):
         on = self.logToggle.isChecked()
         self.log.setVisible(on)
         self.logToggle.setText("Hide log ▾" if on else "Show log ▸")
+        # When the log is open the log itself takes the slack; when closed the
+        # trailing stretch does, so the drop zones / panel never get stretched.
+        self._root.setStretch(self._tail_idx, 0 if on else 1)
+        # grow to give the log room, and restore the exact previous height on close
+        if on:
+            self._pre_log_h = self.height()
+            self.resize(self.width(), self.height() + 260)
+        else:
+            self.resize(self.width(), getattr(self, "_pre_log_h", self.height()))
 
     def open_settings(self):
         dlg = SettingsDialog(self.cfg, self)

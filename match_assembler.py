@@ -143,7 +143,7 @@ class MatchData:
 def _build_player(
     side: str,
     info: ReplayInfo,
-    api: OsuAPI,
+    api: OsuAPI | None,
     cache: Path,
     id_override: int | None,
 ) -> PlayerData:
@@ -168,10 +168,11 @@ def _build_player(
 
     # resolve: prefer explicit id override (handles renamed players), else username
     user: OsuUser | None = None
-    if id_override is not None:
-        user = api.get_user(id_override, by="id")
-    if user is None:
-        user = api.get_user(info.player, by="username")
+    if api is not None:
+        if id_override is not None:
+            user = api.get_user(id_override, by="id")
+        if user is None:
+            user = api.get_user(info.player, by="username")
 
     if user:
         p.resolved = True
@@ -203,7 +204,13 @@ def assemble_match(
     right_id: int | None = None,
     match_title: str = "friendly · bo1",
 ) -> MatchData:
-    api = api or OsuAPI()
+    if api is None:
+        try:
+            api = OsuAPI()
+        except Exception:
+            print("  ! No osu! API key set — continuing without avatars, ranks, flags or pp. "
+                  "(Add credentials in Settings to enable them.)", flush=True)
+            api = None
     cache = Path(cache_dir)
     cache.mkdir(parents=True, exist_ok=True)
 
@@ -218,7 +225,7 @@ def assemble_match(
 
     # map
     md5 = left_info.beatmap_md5
-    bm: OsuBeatmap | None = api.lookup_beatmap_by_md5(md5)
+    bm: OsuBeatmap | None = api.lookup_beatmap_by_md5(md5) if api is not None else None
     mp = MapData(md5=md5)
     if bm:
         mp.resolved = True
