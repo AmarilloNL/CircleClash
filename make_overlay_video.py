@@ -93,19 +93,6 @@ def _s(v: float) -> int:
     return round(v * SCALE)
 
 
-# danser positions HUD elements (PP / Hit counters) in a FIXED virtual space that
-# it scales to the render *height*, so XPosition/YPosition/Scale are
-# resolution-INDEPENDENT — multiplying them by SCALE (as the frame dims correctly
-# are) slid the counters toward centre at 720p/1080p. These constants reproduce
-# the values verified-correct at 4K, now applied at every resolution.
-HUD_VUNIT = 2.0   # danser HUD virtual units per 1080p-design pixel (our panel aspect)
-
-
-def _hp(v: float) -> int:
-    """1080p-design pixel -> danser HUD virtual coordinate (resolution-independent)."""
-    return round(v * HUD_VUNIT)
-
-
 # ----------------------------------------------------------------------------- #
 # Asset helpers
 # ----------------------------------------------------------------------------- #
@@ -215,7 +202,8 @@ def _hsv(hex_color: str) -> dict:
 
 def _render_patch(accent_hex: str, skin: str | None = None, songs_dir: str | None = None,
                   skins_dir: str | None = None, music_vol: float | None = None,
-                  hit_vol: float | None = None, master_vol: float | None = None) -> str:
+                  hit_vol: float | None = None, master_vol: float | None = None,
+                  force_skin_hits: bool = True) -> str:
     """Resolution + a per-side Gameplay restyle, applied via -sPatch so it never
     touches the user's saved danser config. Also points danser at the right Songs
     folder, sets per-side skin, output resolution/FPS, and audio volumes.
@@ -226,7 +214,7 @@ def _render_patch(accent_hex: str, skin: str | None = None, songs_dir: str | Non
     (PP, hit counts) scale with the output resolution.
     """
     tint = _hsv(accent_hex)
-    hud = round(0.7 * HUD_VUNIT, 3)   # constant: danser scales the HUD by render height itself
+    hud = round(0.7 * SCALE, 3)
     patch = {
         "Recording": {"FrameWidth": _s(L.dz_w), "FrameHeight": _s(L.dz_h), "FPS": FPS,
                       "AudioCodec": "aac", "AudioBitrate": "320k"},
@@ -239,14 +227,15 @@ def _render_patch(accent_hex: str, skin: str | None = None, songs_dir: str | Non
             "Boundaries": {"Enabled": False},
             "ShowResultsScreen": False,
             "ShowWarningArrows": False,
-            # --- keep + tidy, tinted; HUD coords are resolution-independent (_hp) ---
+            # --- keep + tidy, tinted; danser positions the HUD in render-frame
+            #     pixels, so these scale with the resolution (bottom-right corner) ---
             "PPCounter": {
-                "Show": True, "XPosition": _hp(L.dz_w - 150), "YPosition": _hp(L.dz_h - 86),
+                "Show": True, "XPosition": _s(L.dz_w - 150), "YPosition": _s(L.dz_h - 86),
                 "Align": "BottomLeft", "Color": tint, "Decimals": 2, "Scale": hud,
             },
             "HitCounter": {
-                "Show": True, "XPosition": _hp(L.dz_w - 150), "YPosition": _hp(L.dz_h - 50),
-                "Spacing": _hp(34), "FontScale": hud, "Align": "Left", "ValueAlign": "Left",
+                "Show": True, "XPosition": _s(L.dz_w - 150), "YPosition": _s(L.dz_h - 50),
+                "Spacing": _s(34), "FontScale": hud, "Align": "Left", "ValueAlign": "Left",
                 "Color300": tint, "Color100": tint, "Color50": tint, "ColorMiss": tint,
                 "Show300": True,
             },
@@ -264,6 +253,10 @@ def _render_patch(accent_hex: str, skin: str | None = None, songs_dir: str | Non
             general["OsuSkinsDir"] = skins_dir
         patch["General"] = general
     audio = {}
+    if force_skin_hits:
+        # use the skin's hitsounds instead of the ones baked into the beatmap, so
+        # every map sounds consistent (and matches the chosen skin).
+        audio["IgnoreBeatmapSamples"] = True
     if master_vol is not None:
         audio["GeneralVolume"] = master_vol
     if music_vol is not None:
@@ -612,6 +605,9 @@ def main() -> None:
     ap.add_argument("--master-volume", type=float, default=None, help="0-1 master volume (both sides)")
     # per-player audio: pick which side's music/hitsounds you hear. Defaults give a
     # single music bed (from P1) under BOTH players' hitsounds.
+    ap.add_argument("--beatmap-hitsounds", action="store_true",
+                    help="use the beatmap's own hitsounds instead of the skin's "
+                         "(default forces skin hitsounds for a consistent sound)")
     ap.add_argument("--keep-fails", action="store_true",
                     help="render every replay exactly as recorded, including fails. By default "
                          "only osu!lazer replays are auto-rendered NoFail (danser's stable HP "
@@ -710,12 +706,13 @@ def main() -> None:
     rh = _vol(args.right_hitsound_volume, args.hitsound_volume, 1.0)
     print(f"  audio: P1 music {lm:.2f} / hits {lh:.2f}  ·  P2 music {rm:.2f} / hits {rh:.2f}")
 
+    skin_hits = not args.beatmap_hitsounds
     left_patch = _render_patch(match.left.accent, skin=args.left_skin, songs_dir=args.songs_dir,
                                skins_dir=args.skins_dir, music_vol=lm,
-                               hit_vol=lh, master_vol=args.master_volume)
+                               hit_vol=lh, master_vol=args.master_volume, force_skin_hits=skin_hits)
     right_patch = _render_patch(match.right.accent, skin=args.right_skin, songs_dir=args.songs_dir,
                                 skins_dir=args.skins_dir, music_vol=rm,
-                                hit_vol=rh, master_vol=args.master_volume)
+                                hit_vol=rh, master_vol=args.master_volume, force_skin_hits=skin_hits)
     print(f"  danser panel resolution: {L.dz_w}x{L.dz_h} (no crop)  ·  stats tinted per side")
 
     if not args.skip_render:

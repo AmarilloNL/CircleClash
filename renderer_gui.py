@@ -115,6 +115,7 @@ DEFAULT_CONFIG = {
     "encoder": "x264",
     "quality": "high",
     "no_fail": True,
+    "force_skin_hits": True,
     "resolution": "1080p",
     "fps": 60,
     "left_music_volume": 100,
@@ -595,6 +596,11 @@ class SettingsDialog(QDialog):
         # Audio
         cl.addSpacing(6)
         cl.addWidget(self._section("Audio"))
+        self.skinhits = QCheckBox("force skin hitsounds (ignore the beatmap's hitsounds)")
+        self.skinhits.setChecked(cfg.get("force_skin_hits", True))
+        self.skinhits.setToolTip("Use the chosen skin's hitsounds for every map instead of the "
+                                 "samples baked into each beatmap, for a consistent sound.")
+        cl.addWidget(self.skinhits)
         sf = self._form()
         self.vol_l_music = self._slider(cfg.get("left_music_volume", cfg.get("music_volume", 100)))
         self.vol_l_hit = self._slider(cfg.get("left_hitsound_volume", cfg.get("hitsound_volume", 100)))
@@ -682,6 +688,7 @@ class SettingsDialog(QDialog):
             "encoder": self.encoder.currentData(),
             "quality": self.quality.currentData(),
             "no_fail": self.nofail.isChecked(),
+            "force_skin_hits": self.skinhits.isChecked(),
             "left_music_volume": self.vol_l_music["s"].value(),
             "left_hitsound_volume": self.vol_l_hit["s"].value(),
             "right_music_volume": self.vol_r_music["s"].value(),
@@ -1057,6 +1064,8 @@ class MainWindow(QMainWindow):
         pargs += ["--encoder", enc, "--quality", self.cfg.get("quality", "high")]
         if not self.cfg.get("no_fail", True):
             pargs += ["--keep-fails"]
+        if not self.cfg.get("force_skin_hits", True):
+            pargs += ["--beatmap-hitsounds"]
 
         # Frozen (.exe): relaunch ourselves in pipeline mode. From source: run the
         # make_overlay_video.py script with the current interpreter.
