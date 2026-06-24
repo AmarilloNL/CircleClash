@@ -1,0 +1,12 @@
+# Python dependencies for CircleClash
+#
+# Install with:
+#   pip install -r requirements.txt
+#   playwright install chromium
+#
+# External tools (NOT pip-installable, must be present separately):
+#   - ffmpeg   : must be on your PATH (used to mix audio + stitch the video)
+#   - danser-go: the app offers to download it on first run, or point Settings at it
+
+PySide6>=6.6        # desktop GUI
+playwright>=1.40     # headless Chromium that renders the overlay + results card

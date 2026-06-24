@@ -1,0 +1,29 @@
+# --- secrets / local config (NEVER commit) ---
+osu_credentials.json
+config.json
+*.secret
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# --- pipeline temp + render artifacts ---
+_gameplay.mp4
+_endcard.mp4
+_concat_list.txt
+_endcard_frames/
+*.mp4
+*.osr
+
+# --- danser / app data (auto-fetched, large) ---
+danser/
+videos/
+
+# --- editor / OS cruft ---
+.idea/
+.vscode/
+.DS_Store
