@@ -41,6 +41,30 @@ _UA = "osu-replay-comparison/0.3 (+local)"
 # Locations
 # --------------------------------------------------------------------------- #
 def _data_root() -> Path:
+    # Portable mode: keep everything (danser, ffmpeg, render-songs, config) in a
+    # single "CircleClash-data" folder next to the app, so the whole tool lives in
+    # one place the user controls. Active automatically for the packaged app, or
+    # opt-in from source via CIRCLECLASH_PORTABLE=1 (or =/path/to/anchor). Falls
+    # back to the per-user data dir if that spot isn't writable (e.g. Program Files).
+    anchor: Path | None = None
+    env = os.environ.get("CIRCLECLASH_PORTABLE")
+    if env and env not in ("0", "1"):
+        anchor = Path(env)
+    elif env == "1":
+        anchor = Path.cwd()
+    elif getattr(sys, "frozen", False):
+        anchor = Path(sys.executable).resolve().parent
+    if anchor is not None:
+        cand = anchor / "CircleClash-data"
+        try:
+            cand.mkdir(parents=True, exist_ok=True)
+            t = cand / ".write-test"
+            t.write_text("ok", encoding="utf-8")
+            t.unlink()
+            return cand
+        except Exception:
+            pass  # not writable -> fall through to the per-user data dir
+
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData/Local")
     elif sys.platform == "darwin":
@@ -48,6 +72,11 @@ def _data_root() -> Path:
     else:
         base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
     return Path(base) / "osu-renderer"
+
+
+def data_root() -> Path:
+    """Public accessor for the shared app-data root (portable-aware)."""
+    return _data_root()
 
 
 def danser_dir() -> Path:

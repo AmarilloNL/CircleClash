@@ -85,6 +85,7 @@ L = Layout
 # scaled size, and ffmpeg composites at scaled coords — so everything stays aligned.
 SCALE = 1.0
 FPS = 60
+FFMPEG = "ffmpeg"   # overridable via --ffmpeg (the GUI passes a provisioned binary)
 RES_SCALES = {"720p": 720 / 1080, "1080p": 1.0, "1440p": 1440 / 1080, "4k": 2160 / 1080}
 
 
@@ -406,7 +407,7 @@ def composite(overlay_png: Path, left_mp4: Path, right_mp4: Path, out: Path,
     # sum pushes past 0 dBFS, so loud sections don't clip/distort.
     amix = ("[1:a][2:a]amix=inputs=2:normalize=0:dropout_transition=0,"
             "alimiter=limit=0.95:attack=5:release=50[amx]")
-    cmd = ["ffmpeg", "-y",
+    cmd = [FFMPEG, "-y",
            "-loop", "1", "-framerate", str(FPS), "-i", str(overlay_png),
            "-i", str(left_mp4), "-i", str(right_mp4)]
 
@@ -577,7 +578,7 @@ def render_endcard_video(match: MatchData, cache: Path, out_mp4: Path,
     vf = (f"[0:v]tpad=stop_mode=clone:stop_duration={hold_sec},fps={fps},"
           f"fade=t=out:st={fade_st:.3f}:d={fade_sec},format=yuv420p[v]")
     cmd = [
-        "ffmpeg", "-y",
+        FFMPEG, "-y",
         "-framerate", str(cap_fps), "-i", str(frames_dir / "f%05d.png"),
         "-f", "lavfi", "-t", f"{total}", "-i", "anullsrc=r=48000:cl=stereo",
         "-filter_complex", vf,
@@ -600,7 +601,7 @@ def concat_videos(gameplay: Path, endcard: Path, out: Path,
     (both files share our encode settings); fall back to a re-encode if needed."""
     listfile = Path("_concat_list.txt")
     listfile.write_text(f"file '{gameplay.resolve()}'\nfile '{endcard.resolve()}'\n")
-    copy_cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(listfile), "-c", "copy", str(out)]
+    copy_cmd = [FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(listfile), "-c", "copy", str(out)]
     print(f"\n  -> joining gameplay + end card: {out}")
     if subprocess.run(copy_cmd).returncode == 0:
         listfile.unlink(missing_ok=True)
@@ -608,7 +609,7 @@ def concat_videos(gameplay: Path, endcard: Path, out: Path,
     # fallback: re-encode concat (robust against any param mismatch), same encoder
     print("  (stream-copy concat failed; re-encoding)")
     fc = "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]"
-    reenc = ["ffmpeg", "-y", "-i", str(gameplay), "-i", str(endcard),
+    reenc = [FFMPEG, "-y", "-i", str(gameplay), "-i", str(endcard),
              "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
              *_venc(encoder, quality),
              "-c:a", "aac", "-b:a", "256k", "-ar", "48000", str(out)]
@@ -644,6 +645,8 @@ def main() -> None:
     ap.add_argument("--right-skin", default=None, help="danser skin name for the right player's panel")
     ap.add_argument("--resolution", choices=list(RES_SCALES.keys()), default="1080p", help="output resolution")
     ap.add_argument("--fps", type=int, default=60, help="output framerate (danser render + composite)")
+    ap.add_argument("--ffmpeg", default=None,
+                    help="path to the ffmpeg binary (defaults to 'ffmpeg' on PATH)")
     ap.add_argument("--music-volume", type=float, default=None, help="0-1 music volume (fallback for both sides)")
     ap.add_argument("--hitsound-volume", type=float, default=None, help="0-1 hitsound (sample) volume (fallback for both sides)")
     ap.add_argument("--master-volume", type=float, default=None, help="0-1 master volume (both sides)")
@@ -671,9 +674,11 @@ def main() -> None:
     ap.add_argument("--png", default="overlay_base.png")
     args = ap.parse_args()
 
-    global SCALE, FPS
+    global SCALE, FPS, FFMPEG
     SCALE = RES_SCALES.get(args.resolution, 1.0)
     FPS = max(1, int(args.fps))
+    if args.ffmpeg:
+        FFMPEG = args.ffmpeg
     if args.resolution != "1080p" or FPS != 60:
         print(f"  output: {args.resolution} (scale {SCALE:.3f}) @ {FPS}fps")
 

@@ -44,6 +44,11 @@ try:
 except Exception:
     danser_setup = None
 
+try:
+    import ffmpeg_setup
+except Exception:
+    ffmpeg_setup = None
+
 HERE = Path(__file__).resolve().parent
 PIPELINE = HERE / "make_overlay_video.py"
 
@@ -104,6 +109,7 @@ CONFIG_PATH = config_dir() / "config.json"
 DEFAULT_CONFIG = {
     "danser_bin": "",
     "danser_video_dir": "",
+    "ffmpeg_bin": "",
     "songs_dir": "",
     "skins_dir": "",
     "output_dir": str(Path.home()),
@@ -231,15 +237,30 @@ def _elide(s: str, n: int = 52) -> str:
 # --------------------------------------------------------------------------- #
 class DanserSetupWorker(QObject):
     progress = Signal(float, str)
-    done = Signal(str)      # path on success
-    failed = Signal(str)    # message on failure
+    done = Signal(str, str)   # (danser_path, ffmpeg_path) — ffmpeg may be ""
+    failed = Signal(str)      # message on failure
 
     def run(self):
         try:
-            path = danser_setup.ensure(progress=lambda f, m: self.progress.emit(f, m))
-            self.done.emit(str(path))
+            dpath = danser_setup.ensure(progress=lambda f, m: self.progress.emit(f, m))
         except Exception as e:
             self.failed.emit(str(e))
+            return
+        # ffmpeg is best-effort: if it's already around (managed or on PATH) reuse
+        # it, otherwise try to fetch it, but never fail the whole setup over it.
+        fpath = ""
+        if ffmpeg_setup is not None:
+            try:
+                existing = ffmpeg_setup.find_local_ffmpeg()
+                if existing is None and shutil.which("ffmpeg") is None:
+                    self.progress.emit(0.0, "Fetching ffmpeg…")
+                    existing = ffmpeg_setup.install(
+                        progress=lambda f, m: self.progress.emit(f, m))
+                if existing:
+                    fpath = str(existing[0])
+            except Exception:
+                fpath = ""
+        self.done.emit(dpath, fpath)
 
 
 # --------------------------------------------------------------------------- #
@@ -457,7 +478,15 @@ class WelcomeDialog(QDialog):
         sec = QLabel("What you'll need"); sec.setProperty("role", "section")
         cv.addWidget(sec)
 
-        ffmpeg_ok = shutil.which("ffmpeg") is not None
+        cfg_ff = cfg.get("ffmpeg_bin", "")
+        ffmpeg_ok = bool(cfg_ff) and (Path(cfg_ff).exists() or shutil.which(cfg_ff) is not None)
+        if not ffmpeg_ok and ffmpeg_setup is not None:
+            try:
+                ffmpeg_ok = ffmpeg_setup.find_local_ffmpeg() is not None
+            except Exception:
+                pass
+        if not ffmpeg_ok:
+            ffmpeg_ok = shutil.which("ffmpeg") is not None
         danser_ok = bool(cfg.get("danser_bin")) and Path(cfg["danser_bin"]).exists()
         if not danser_ok and danser_setup is not None:
             try:
@@ -468,7 +497,7 @@ class WelcomeDialog(QDialog):
         cv.addLayout(self._req("danser-go", danser_ok, "required · renders the gameplay",
                                "found" if danser_ok else "we'll set it up in a moment"))
         cv.addLayout(self._req("ffmpeg", ffmpeg_ok, "required · stitches the video",
-                               "found on PATH" if ffmpeg_ok else "install it and add it to your PATH"))
+                               "found" if ffmpeg_ok else "we'll set it up in a moment"))
         cv.addLayout(self._req("osu! API key", bool(cfg.get("api_client_id")),
                                "optional · avatars, ranks, flags & pp",
                                "configured" if cfg.get("api_client_id") else "add later in Settings"))
@@ -534,6 +563,7 @@ class SettingsDialog(QDialog):
         pf = self._form()
         self.danser_bin = self._file_row(pf, "danser binary", cfg["danser_bin"], pick_file=True)
         self.danser_video = self._file_row(pf, "danser video output dir", cfg["danser_video_dir"], pick_file=False)
+        self.ffmpeg_bin = self._file_row(pf, "ffmpeg binary", cfg.get("ffmpeg_bin", ""), pick_file=True)
         self.songs = self._file_row(pf, "osu! Songs folder (your library)", cfg["songs_dir"], pick_file=False)
         self.skins = self._file_row(pf, "osu! Skins folder", cfg.get("skins_dir", ""), pick_file=False)
         self.output = self._file_row(pf, "output folder", cfg["output_dir"], pick_file=False)
@@ -677,6 +707,7 @@ class SettingsDialog(QDialog):
         return {
             "danser_bin": self.danser_bin.text().strip(),
             "danser_video_dir": self.danser_video.text().strip(),
+            "ffmpeg_bin": self.ffmpeg_bin.text().strip(),
             "songs_dir": self.songs.text().strip(),
             "skins_dir": self.skins.text().strip(),
             "output_dir": self.output.text().strip() or str(Path.home()),
@@ -763,12 +794,36 @@ class MainWindow(QMainWindow):
             WelcomeDialog(self.cfg, self).exec()
             self.cfg["welcomed"] = True
             save_config(self.cfg)
-        if not self.cfg["danser_bin"]:
+        self._resolve_ffmpeg()
+        if not self.cfg["danser_bin"] or not self._have_ffmpeg():
             self._first_run_danser()
 
+    def _resolve_ffmpeg(self):
+        """Pick up an ffmpeg we already have (a managed copy, or one on PATH) into
+        config, without downloading. Provisioning happens in the first-run flow."""
+        cur = self.cfg.get("ffmpeg_bin", "")
+        if cur and Path(cur).exists():
+            return
+        if ffmpeg_setup is not None:
+            got = ffmpeg_setup.find_local_ffmpeg()
+            if got:
+                self.cfg["ffmpeg_bin"] = str(got[0])
+                save_config(self.cfg)
+                return
+        onpath = shutil.which("ffmpeg")
+        if onpath:
+            self.cfg["ffmpeg_bin"] = onpath
+            save_config(self.cfg)
+
+    def _have_ffmpeg(self) -> bool:
+        cur = self.cfg.get("ffmpeg_bin", "")
+        if cur and (Path(cur).exists() or shutil.which(cur)):
+            return True
+        return shutil.which("ffmpeg") is not None
+
     def _first_run_danser(self):
-        """If danser isn't configured, try a previous auto-install, else offer to
-        download it now (falling back to manual setup)."""
+        """If danser or ffmpeg isn't configured, try a previous auto-install, else
+        offer to download them now (falling back to manual setup)."""
         if danser_setup is not None:
             local = danser_setup.find_local_danser()
             if local:
@@ -777,12 +832,24 @@ class MainWindow(QMainWindow):
                     self.cfg["danser_video_dir"] = str(Path(local).resolve().parent / "videos")
                 save_config(self.cfg)
                 self._refresh_enabled()
+                if self._have_ffmpeg():
+                    return
+                # danser's fine, only ffmpeg is missing — offer just that
+                if ffmpeg_setup is not None and QMessageBox.question(
+                        self, "Set up ffmpeg",
+                        "CircleClash uses ffmpeg to stitch the video, but it isn't installed "
+                        "yet.\n\nDownload it automatically now? (kept in this app's data folder).\n\n"
+                        "Choose No to install ffmpeg yourself and add it to your PATH.",
+                        QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+                    self.download_danser()
                 return
+            need = "danser-go" + ("" if self._have_ffmpeg() else " and ffmpeg")
             choice = QMessageBox.question(
-                self, "Set up danser",
-                "CircleClash uses danser-go to render the gameplay, but it isn't installed yet.\n\n"
-                "Download and set it up automatically now? (~small download, kept in this app's "
-                "data folder — danser is GPL-3.0 and fetched from its official GitHub release.)\n\n"
+                self, "Set up CircleClash",
+                f"CircleClash needs {need} to render, but they aren't installed yet.\n\n"
+                "Download and set everything up automatically now? (kept in this app's data "
+                "folder — danser is GPL-3.0 and fetched from its official GitHub release; "
+                "ffmpeg is a static build.)\n\n"
                 "Choose No to point at an existing danser yourself.",
                 QMessageBox.Yes | QMessageBox.No)
             if choice == QMessageBox.Yes:
@@ -816,13 +883,16 @@ class MainWindow(QMainWindow):
         self.progress.setValue(int(frac * 100))
         self.status.setText(msg)
 
-    def _on_danser_done(self, path):
+    def _on_danser_done(self, path, ffmpeg_path):
         self._setup_thread.quit(); self._setup_thread.wait()
         self.cfg["danser_bin"] = path
         if not self.cfg.get("danser_video_dir"):
             self.cfg["danser_video_dir"] = str(Path(path).resolve().parent / "videos")
+        if ffmpeg_path:
+            self.cfg["ffmpeg_bin"] = ffmpeg_path
         save_config(self.cfg)
-        self.status.setText("danser ready — finish setup in Settings (Songs folder, output)")
+        ready = "danser + ffmpeg ready" if ffmpeg_path else "danser ready"
+        self.status.setText(f"{ready} — finish setup in Settings (Songs folder, output)")
         self.settingsBtn.setEnabled(True)
         self._refresh_enabled()
         self.open_settings()
@@ -1066,6 +1136,9 @@ class MainWindow(QMainWindow):
             pargs += ["--keep-fails"]
         if not self.cfg.get("force_skin_hits", True):
             pargs += ["--beatmap-hitsounds"]
+        ff = self.cfg.get("ffmpeg_bin", "")
+        if ff and (Path(ff).exists() or shutil.which(ff)):
+            pargs += ["--ffmpeg", ff]
 
         # Frozen (.exe): relaunch ourselves in pipeline mode. From source: run the
         # make_overlay_video.py script with the current interpreter.
