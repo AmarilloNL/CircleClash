@@ -334,6 +334,50 @@ ENCODERS: dict[str, dict] = {
 QUALITY_LEVELS = ["lossless", "high", "balanced", "compact"]
 
 
+# Bump this to force a one-time danser-db rebuild for all users on upgrade
+# (clears stale entries left by older versions that could crash the render).
+_DB_RESET_TOKEN = "1"
+
+
+def _refresh_danser_db(danser_bin: str, *, staged_status: str | None = None) -> None:
+    """danser keeps a beatmap database that, with -nodbcheck, never drops entries
+    for maps that have since moved or been removed — so it can resolve a replay's
+    md5 to a dead path and hard-crash ("no such file or directory").
+
+    We rebuild the db (danser re-imports from the small render-songs folder, which
+    is quick) in exactly two cases, and otherwise leave it alone so already-staged
+    renders stay fast:
+      1. once per install, to clear stale entries from before this fix existed;
+      2. whenever we just changed render-songs this run (a fresh download or link
+         can collide with an old entry for the same md5)."""
+    base = Path(danser_bin).resolve().parent
+    marker = base / ".circleclash-dbreset"
+    try:
+        first_time = marker.read_text(encoding="utf-8").strip() != _DB_RESET_TOKEN
+    except Exception:
+        first_time = True
+    changed = staged_status in ("linked", "downloaded", "downloaded_patched", "version_mismatch")
+    if not (first_time or changed):
+        return
+
+    removed = False
+    for name in ("danser.db", "danser.db-shm", "danser.db-wal"):
+        try:
+            (base / name).unlink()
+            removed = True
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+    try:
+        marker.write_text(_DB_RESET_TOKEN, encoding="utf-8")
+    except Exception:
+        pass
+    if removed:
+        reason = "one-time cleanup of stale entries" if first_time else "freshly staged map"
+        print(f"  danser db refreshed ({reason}; rebuilt from render-songs)")
+
+
 def _venc(encoder: str = "x264", quality: str = "high") -> list[str]:
     """Video-encoder ffmpeg args for the chosen encoder + quality level. NVENC
     options use your 4080's hardware encoders (fast; AV1 needs RTX 40-series);
@@ -676,6 +720,7 @@ def main() -> None:
         raise SystemExit("--danser-video-dir is required for the full pipeline (or use --chrome-only).")
     video_dir = Path(args.danser_video_dir)
     danser = sync_poc.find_danser(args.danser_bin)
+    staged_status = None
 
     # Stage just this match's map into the small render-songs folder danser reads
     # (reuse from the user's library if owned, else download). Keeps danser's
@@ -685,6 +730,7 @@ def main() -> None:
         print(f"Staging beatmap into {args.songs_dir} ...")
         status, folder = ensure_render_map(match.map.md5, args.songs_dir,
                                            set_id=match.map.set_id, library=args.library_dir)
+        staged_status = status
         msg = {
             "present": "already staged",
             "linked": "reused from your library",
@@ -716,6 +762,7 @@ def main() -> None:
     print(f"  danser panel resolution: {L.dz_w}x{L.dz_h} (no crop)  ·  stats tinted per side")
 
     if not args.skip_render:
+        _refresh_danser_db(danser, staged_status=staged_status)
         force_nf = not args.keep_fails
         l_mods2 = _mods2_arg(args.left, force_nofail=force_nf)
         r_mods2 = _mods2_arg(args.right, force_nofail=force_nf)
