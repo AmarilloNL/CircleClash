@@ -11,57 +11,79 @@ card at the end. Drop a `.osr` on each side, hit **Render**, get a shareable `.m
 
 ## Download
 
-**Easiest (when available):** grab the prebuilt app from the
-[**Releases**](https://github.com/AmarilloNL/CircleClash/releases) page — no Python needed.
-You will still need **ffmpeg** installed (see below); danser is downloaded automatically on first run.
+### Windows — just grab the app
 
-**From source:** follow the platform instructions below. This always works and is the recommended
-route until prebuilt binaries are published.
+1. Go to the [**Releases**](https://github.com/AmarilloNL/CircleClash/releases) page and download
+   **`CircleClash-windows.exe`** from the latest release.
+2. Put it in its own folder (e.g. `Documents\CircleClash`) — on first run it creates a
+   `CircleClash-data` folder right next to it for everything it needs.
+3. Double-click it. That's it.
+
+No Python, no ffmpeg install, nothing to add to your PATH. On first launch CircleClash downloads
+**danser-go** and **ffmpeg** automatically into that data folder, so the whole tool lives in one place
+you can move or delete as a unit.
+
+> You don't need to build anything. Running from source (below) is entirely optional — only useful if
+> you want to modify the code.
+
+### Linux
+
+Download **`CircleClash-linux`** from [**Releases**](https://github.com/AmarilloNL/CircleClash/releases),
+`chmod +x CircleClash-linux`, and run it — it sets up danser and ffmpeg the same way. Prefer running
+from source? See the Linux instructions below.
 
 ---
 
 ## What you need
 
+**Using the prebuilt app, you need nothing** — it provisions danser and ffmpeg itself. The table below
+only applies if you choose to run from source.
+
 | Requirement | Required? | Notes |
 |---|---|---|
-| **Python 3.10 or newer** | yes (from source) | 3.10, 3.11, 3.12 all fine |
-| **ffmpeg** | yes | must be reachable on your `PATH` |
-| **danser-go** | yes | the app offers to download it automatically on first run |
+| **Python 3.10 or newer** | from source only | 3.10, 3.11, 3.12 all fine |
+| **ffmpeg** | auto | downloaded on first run; or use a system ffmpeg if you already have one |
+| **danser-go** | auto | downloaded automatically on first run |
 | **osu! API key** | optional | adds avatars, ranks, flags and pp to the overlay |
 | **NVIDIA GPU** | optional | only needed for the NVENC (GPU) encoders; everyone else uses x264/x265 |
 
 ---
 
-## Install — Linux
+## Linux — run from source (optional)
+
+> There's a prebuilt **`CircleClash-linux`** on the [Releases](https://github.com/AmarilloNL/CircleClash/releases)
+> page that needs none of this. The steps below are only for running from source.
 
 These steps use a **virtual environment**. On modern distros (Arch, Debian 12+, Fedora, …) a plain
 `pip install` into the system Python is blocked with an *"externally-managed-environment"* error —
 the virtual environment avoids that completely, so please don't skip it.
 
-### 1. Install Python + ffmpeg with your package manager
+### 1. Install Python (ffmpeg is optional)
+
+CircleClash downloads ffmpeg automatically on first run, so you don't have to install it. If you'd
+rather use your distro's ffmpeg, the package is listed alongside Python below.
 
 **Arch / CachyOS / Manjaro / EndeavourOS**
 ```bash
-sudo pacman -S --needed python python-pip ffmpeg git
+sudo pacman -S --needed python python-pip git    # add `ffmpeg` to use the system build
 ```
 
 **Debian / Ubuntu / Linux Mint / Pop!_OS**
 ```bash
 sudo apt update
-sudo apt install python3 python3-pip python3-venv ffmpeg git
+sudo apt install python3 python3-pip python3-venv git    # add `ffmpeg` for the system build
 ```
 
 **Fedora / Nobara**
 ```bash
 sudo dnf install python3 python3-pip git
-# ffmpeg lives in RPM Fusion (the version in Fedora's own repos is codec-limited):
-sudo dnf install https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
-sudo dnf install ffmpeg
+# optional system ffmpeg (RPM Fusion; Fedora's own build is codec-limited):
+# sudo dnf install https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm && sudo dnf install ffmpeg
 ```
 
 **openSUSE**
 ```bash
-sudo zypper install python3 python3-pip ffmpeg git
+sudo zypper install python3 python3-pip git    # add `ffmpeg` for the system build
 ```
 
 > NVENC (GPU encoding) on Linux also needs the **proprietary NVIDIA driver**. On the open/nouveau
@@ -88,28 +110,22 @@ Next time, just `cd CircleClash`, run `source .venv/bin/activate`, then `python 
 
 ---
 
-## Install — Windows
+## Windows
+
+**You don't need this section to use CircleClash** — download `CircleClash-windows.exe` from
+[**Releases**](https://github.com/AmarilloNL/CircleClash/releases) and run it (see [Download](#download)).
+danser, ffmpeg and everything else are handled for you.
+
+<details>
+<summary><b>Optional: run from source on Windows</b> (only if you want to modify the code)</summary>
 
 ### 1. Install Python
 Download the latest **Python 3.x** from [python.org/downloads](https://www.python.org/downloads/).
-In the installer, **tick "Add python.exe to PATH"** on the first screen before clicking Install —
-this one checkbox prevents the most common Windows error.
+In the installer, **tick "Add python.exe to PATH"** on the first screen before clicking Install.
 
-### 2. Install ffmpeg
-Open **PowerShell** and run:
-```powershell
-winget install Gyan.FFmpeg
-```
-Then **close and reopen** PowerShell so the new `PATH` is picked up. Check it works:
-```powershell
-ffmpeg -version
-```
-(No winget? Download a build from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/), unzip it, and add
-its `bin` folder to your `PATH`.)
-
-### 3. Get CircleClash + install its Python packages
-Download the source (green **Code → Download ZIP** on GitHub, or the release zip) and unzip it.
-Then in PowerShell, inside the unzipped folder:
+### 2. Get CircleClash + install its Python packages
+Download the source (green **Code → Download ZIP** on GitHub) and unzip it. Then in PowerShell, inside
+the unzipped folder:
 ```powershell
 py -m venv .venv
 .venv\Scripts\Activate.ps1
@@ -120,14 +136,22 @@ playwright install chromium
 > If `Activate.ps1` is blocked, run PowerShell once as Administrator and execute
 > `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, then try again.
 
-### 4. Run it
+### 3. Run it
 ```powershell
 py renderer_gui.py
 ```
+ffmpeg and danser are downloaded automatically on first run, just like the packaged app — you don't
+need to install them separately.
+
+</details>
 
 ---
 
-## Install — macOS
+## macOS — run from source
+
+> There's no prebuilt macOS app, and the automatic danser/ffmpeg download isn't available on macOS
+> (neither ships an official macOS build), so on macOS you install both yourself via Homebrew below
+> and point CircleClash at danser in Settings.
 
 > macOS has no NVENC, so in Settings choose the **x264** or **x265** encoder (the NVENC options are
 > for NVIDIA GPUs only).
@@ -165,8 +189,9 @@ python renderer_gui.py
 
 A short welcome appears and checks your setup. Then:
 
-1. **danser-go** — if it isn't found, CircleClash offers to download it automatically (kept in the
-   app's own data folder). Choose *No* to point at an existing danser binary instead.
+1. **danser-go + ffmpeg** — if they aren't found, CircleClash offers to download them automatically
+   (kept in the app's own data folder next to it). Choose *No* to point at an existing danser binary
+   yourself.
 2. **osu! Songs folder** — open **Settings** and set this to your osu! `Songs` folder so beatmaps
    can be located.
 3. **osu! API** *(optional)* — see below.
@@ -182,7 +207,8 @@ A short welcome appears and checks your setup. Then:
 
 ## Settings reference
 
-- **Paths** — danser binary, danser video output dir, your osu! Songs & Skins folders, output folder.
+- **Paths** — danser binary, danser video output dir, **ffmpeg binary**, your osu! Songs & Skins
+  folders, output folder. (The packaged app fills in danser and ffmpeg for you.)
 - **osu! API** — optional client id/secret (avatars, ranks, flags, pp).
 - **Timing** — gameplay tail after the last note, end-card hold, results animation speed.
 - **Encoding**
@@ -207,8 +233,9 @@ Credentials are stored only on your machine and are never committed to git.
 
 - **"Playwright missing" / the overlay doesn't render** — run `playwright install chromium` inside
   your activated virtual environment.
-- **"ffmpeg not found"** — ffmpeg isn't on your `PATH`. Reinstall per the steps above and reopen your
-  terminal. Verify with `ffmpeg -version`.
+- **"ffmpeg not found"** — let CircleClash fetch it: it downloads ffmpeg on first run, or you can set
+  the **ffmpeg binary** path in Settings → Paths. If you prefer a system ffmpeg, install it and make
+  sure it's on your `PATH`, then reopen the app.
 - **NVENC encoder fails** — you don't have a supported NVIDIA GPU/driver (AV1 needs RTX 40-series).
   Switch the encoder to **x264** in Settings.
 - **The video won't play / looks broken in some players** — HEVC and AV1 aren't supported everywhere.
@@ -222,15 +249,18 @@ Credentials are stored only on your machine and are never committed to git.
 
 ## Credits & licenses
 
-CircleClash orchestrates two external tools that it does **not** bundle:
+CircleClash orchestrates external tools that it does **not** bundle — it fetches them at runtime:
 
 - **[danser-go](https://github.com/Wieku/danser-go)** (GPL-3.0) — renders the gameplay. Downloaded
   from its official GitHub releases on first run.
-- **[ffmpeg](https://ffmpeg.org/)** — mixes the audio and stitches the final video.
+- **[ffmpeg](https://ffmpeg.org/)** — mixes the audio and stitches the final video. A static build
+  (from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)) is downloaded on first run, or you
+  can point at a system ffmpeg.
 - **[Playwright](https://playwright.dev/)** — headless Chromium that renders the overlay and results card.
 
-Because danser is fetched at runtime rather than shipped, its license doesn't constrain this
-repository's license. *(Add your own `LICENSE` file — MIT is a common choice.)*
+danser and ffmpeg are fetched at runtime and run as separate processes, so they keep their own
+licenses and don't constrain this repository. CircleClash itself is released under the **MIT** license
+(see `LICENSE`).
 
 ---
 
@@ -261,8 +291,15 @@ How the packaging works (worth knowing if you tweak it):
   with `PLAYWRIGHT_BROWSERS_PATH=0` and collected via `--collect-all playwright`; the frozen app sets
   the same variable so it loads the bundled browser. *(For a much smaller build, the alternative is to
   render the overlay with Qt/Pillow instead of HTML and drop Chromium entirely.)*
-- **ffmpeg and danser are not bundled** — danser is auto-fetched on first run; ffmpeg stays a
-  documented prerequisite.
+- **danser and ffmpeg are auto-provisioned, not embedded** — on first run the app downloads danser
+  (GPL-3.0, from its official GitHub release) and a static ffmpeg build (GPL, from BtbN/FFmpeg-Builds)
+  into its data folder. They run as separate processes, so CircleClash's own MIT license is unaffected
+  and the binaries keep their own licenses. This keeps the executable small and the downloads easy to
+  update.
+- **Portable by default** — the packaged app stores danser, ffmpeg, render-songs and config in a
+  `CircleClash-data` folder next to the executable, so the whole tool lives in one place the user
+  controls. If that location isn't writable (e.g. Program Files) it falls back to the per-user data
+  dir. From source you can opt in with `CIRCLECLASH_PORTABLE=1` (or `=/path/to/anchor`).
 
 > First CI run tip: if Chromium isn't found at runtime, double-check the `PLAYWRIGHT_BROWSERS_PATH: '0'`
 > env on both the install and build steps — that's the usual culprit.
