@@ -218,6 +218,13 @@ A short welcome appears and checks your setup. Then:
 - **Audio** — independent **P1/P2 music** and **P1/P2 hitsound** volumes plus a master. Both players
   play the same song, so P2 music defaults to 0 (turn it up to crossfade, or mute a side's hitsounds
   to hear only one player).
+- **Visual** — tune the danser HUD, background and cursor (all optional, off by default):
+  - *Background:* dark / dimmed / visible / blurred.
+  - *Cursor size* and *trail length.*
+  - *Effects:* bloom/glow, hit lighting, aim-error scatter meter, prominent unstable rate,
+    pp breakdown (aim/speed/acc), per-side mods badge, ignore hitsound volume changes, disable storyboards.
+  - *HUD elements:* hide the pp counter, hit counts, hit-error bar, key overlay or combo
+    (score + accuracy always show).
 
 ## osu! API key (optional)
 
@@ -236,8 +243,10 @@ Credentials are stored only on your machine and are never committed to git.
 - **"ffmpeg not found"** — let CircleClash fetch it: it downloads ffmpeg on first run, or you can set
   the **ffmpeg binary** path in Settings → Paths. If you prefer a system ffmpeg, install it and make
   sure it's on your `PATH`, then reopen the app.
-- **NVENC encoder fails** — you don't have a supported NVIDIA GPU/driver (AV1 needs RTX 40-series).
-  Switch the encoder to **x264** in Settings.
+- **NVENC encoder fails** — your GPU/driver doesn't support the chosen NVENC codec (AV1 needs an
+  RTX 40-series *and* a recent driver). CircleClash now detects this and **automatically falls back to
+  x264** so the render still finishes; pick **NVENC H.264/HEVC** or **x264** in Settings to avoid the
+  fallback, or update your NVIDIA driver for AV1.
 - **The video won't play / looks broken in some players** — HEVC and AV1 aren't supported everywhere.
   For maximum compatibility (and for sharing locally), use the **x264** encoder.
 - **`externally-managed-environment` on pip (Linux)** — you skipped the virtual environment. Create
@@ -260,7 +269,8 @@ CircleClash orchestrates external tools that it does **not** bundle — it fetch
 
 danser and ffmpeg are fetched at runtime and run as separate processes, so they keep their own
 licenses and don't constrain this repository. CircleClash itself is released under the **MIT** license
-(see `LICENSE`).
+(see `LICENSE`). Bundled and fetched components and their licenses are listed in
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
 
 ---
 
@@ -271,8 +281,8 @@ A ready-to-use GitHub Actions workflow is included at `.github/workflows/build.y
 attaches them to the GitHub Release. To cut a release:
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.0
+git push origin v1.1.0
 ```
 
 The workflow then produces `CircleClash-windows.exe` and `CircleClash-linux` (one file each) and

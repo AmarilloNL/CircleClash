@@ -204,7 +204,7 @@ def _hsv(hex_color: str) -> dict:
 def _render_patch(accent_hex: str, skin: str | None = None, songs_dir: str | None = None,
                   skins_dir: str | None = None, music_vol: float | None = None,
                   hit_vol: float | None = None, master_vol: float | None = None,
-                  force_skin_hits: bool = True) -> str:
+                  force_skin_hits: bool = True, vis: dict | None = None) -> str:
     """Resolution + a per-side Gameplay restyle, applied via -sPatch so it never
     touches the user's saved danser config. Also points danser at the right Songs
     folder, sets per-side skin, output resolution/FPS, and audio volumes.
@@ -228,15 +228,17 @@ def _render_patch(accent_hex: str, skin: str | None = None, songs_dir: str | Non
             "Boundaries": {"Enabled": False},
             "ShowResultsScreen": False,
             "ShowWarningArrows": False,
-            # --- keep + tidy, tinted; danser positions the HUD in render-frame
-            #     pixels, so these scale with the resolution (bottom-right corner) ---
+            # --- keep + tidy, tinted. Anchored to the panel's bottom-RIGHT with a
+            #     fixed margin (BottomRight/Right align) so the value grows leftward
+            #     and a long pp number (e.g. 1141.37) can never slide under the right
+            #     border. Positions are in render-frame pixels, so they scale with res. ---
             "PPCounter": {
-                "Show": True, "XPosition": _s(L.dz_w - 150), "YPosition": _s(L.dz_h - 86),
-                "Align": "BottomLeft", "Color": tint, "Decimals": 2, "Scale": hud,
+                "Show": True, "XPosition": _s(L.dz_w - 48), "YPosition": _s(L.dz_h - 86),
+                "Align": "BottomRight", "Color": tint, "Decimals": 2, "Scale": hud,
             },
             "HitCounter": {
-                "Show": True, "XPosition": _s(L.dz_w - 150), "YPosition": _s(L.dz_h - 50),
-                "Spacing": _s(34), "FontScale": hud, "Align": "Left", "ValueAlign": "Left",
+                "Show": True, "XPosition": _s(L.dz_w - 48), "YPosition": _s(L.dz_h - 50),
+                "Spacing": _s(34), "FontScale": hud, "Align": "Right", "ValueAlign": "Right",
                 "Color300": tint, "Color100": tint, "Color50": tint, "ColorMiss": tint,
                 "Show300": True,
             },
@@ -246,6 +248,69 @@ def _render_patch(accent_hex: str, skin: str | None = None, songs_dir: str | Non
             "KeyOverlay": {"Show": True},
         },
     }
+    # ---- optional visual tweaks (all default to current behaviour) -------------
+    v = vis or {}
+    g = patch["Gameplay"]
+
+    # HUD element visibility (Score/accuracy stays as set above unless toggled)
+    g["PPCounter"]["Show"]     = v.get("show_pp", True)
+    g["HitCounter"]["Show"]    = v.get("show_hitcounts", True)
+    g["HitErrorMeter"]["Show"] = v.get("show_hiterror", True)
+    g["KeyOverlay"]["Show"]    = v.get("show_keys", True)
+    g["ComboCounter"]["Show"]  = v.get("show_combo", True)
+    g["Score"]["Show"]         = v.get("show_score", True)
+
+    # pp breakdown (aim / speed / acc) under the pp counter
+    g["PPCounter"]["ShowPPComponents"] = bool(v.get("pp_components", False))
+
+    # make the unstable-rate readout big + precise
+    if v.get("prominent_ur"):
+        g["HitErrorMeter"]["ShowUnstableRate"]     = True
+        g["HitErrorMeter"]["UnstableRateScale"]    = round(1.6 * SCALE, 3)
+        g["HitErrorMeter"]["UnstableRateDecimals"] = 2
+
+    # per-side mods badge (each panel shows that replay's own mods)
+    g["Mods"] = {"Show": bool(v.get("show_mods", False))}
+
+    # hit lighting flashes on each hit
+    if v.get("hit_lighting"):
+        g["ShowHitLighting"] = True
+
+    # aim-error scatter (off by default; danser's default position is off our
+    # 918px frame, so anchor it inside — top-left, clear of combo/score/UR)
+    if v.get("aim_error"):
+        g["AimErrorMeter"] = {
+            "Show": True, "Scale": round(0.9 * SCALE, 3),
+            "XPosition": _s(96), "YPosition": _s(96), "Align": "Left",
+            "ShowUnstableRate": False,
+        }
+
+    # ---- background / bloom (Playfield) ----------------------------------------
+    bg_dim  = float(v.get("bg_dim", 0.95))          # danser default = 0.95 (dark)
+    bg_blur = float(v.get("bg_blur", 0.0))          # 0 = off
+    background = {
+        "LoadStoryboards": bool(v.get("storyboards", True)),
+        "LoadVideos":      bool(v.get("videos", False)),
+        "Dim":  {"Intro": bg_dim, "Normal": bg_dim, "Breaks": bg_dim},
+        "Blur": {"Enabled": bg_blur > 0,
+                 "Values": {"Intro": 0.0, "Normal": bg_blur, "Breaks": bg_blur}},
+    }
+    playfield = {"Background": background}
+    if v.get("bloom"):
+        playfield["Bloom"] = {"Enabled": True}
+    patch["Playfield"] = playfield
+
+    # ---- cursor size / trail length --------------------------------------------
+    cursor = {}
+    csize = float(v.get("cursor_size", 0.0))        # absolute osu!px; 0 = default
+    if csize > 0:
+        cursor["CursorSize"] = csize
+    tlen = float(v.get("trail_length", 1.0))        # multiplier on danser's default
+    if abs(tlen - 1.0) > 1e-6:
+        cursor["TrailMaxLength"] = max(1, int(round(2000 * tlen)))
+    if cursor:
+        patch["Cursor"] = cursor
+
     if songs_dir or skins_dir:
         general = {}
         if songs_dir:
@@ -254,6 +319,9 @@ def _render_patch(accent_hex: str, skin: str | None = None, songs_dir: str | Non
             general["OsuSkinsDir"] = skins_dir
         patch["General"] = general
     audio = {}
+    if v.get("ignore_sample_volume"):
+        # keep hitsounds at a constant level (ignore per-section volume changes)
+        audio["IgnoreBeatmapSampleVolume"] = True
     if force_skin_hits:
         # use the skin's hitsounds instead of the ones baked into the beatmap, so
         # every map sounds consistent (and matches the chosen skin).
@@ -386,6 +454,36 @@ def _venc(encoder: str = "x264", quality: str = "high") -> list[str]:
     enc = ENCODERS.get(encoder, ENCODERS["x264"])
     qval = enc["q"].get(quality, enc["q"]["high"])
     return enc["args"] + [enc["rc"], str(qval)] + enc["extra"] + ["-pix_fmt", "yuv420p"]
+
+
+def _encoder_available(encoder: str) -> bool:
+    """Quick pre-flight: can this ffmpeg actually open the chosen encoder here?
+
+    CPU encoders (libx264/libx265) are always assumed present. For GPU (NVENC)
+    encoders we briefly try to encode a single black frame and check the exit
+    code — this catches cases like the bundled bleeding-edge ffmpeg whose
+    av1_nvenc needs a newer NVIDIA driver than is installed (the encoder fails to
+    *open*, regardless of input, so a 1-frame probe surfaces it in <1s instead of
+    blowing up minutes into the real composite)."""
+    spec = ENCODERS.get(encoder)
+    if not spec:
+        return False
+    args = spec["args"]
+    try:
+        codec = args[args.index("-c:v") + 1]
+    except (ValueError, IndexError):
+        return True
+    if codec.startswith("lib"):          # libx264 / libx265 -> CPU, always fine
+        return True
+    probe = [FFMPEG, "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=c=black:s=320x240:r=10:d=0.2",
+             "-pix_fmt", "yuv420p", "-frames:v", "1", "-c:v", codec, "-f", "null", "-"]
+    try:
+        r = subprocess.run(probe, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=30)
+        return r.returncode == 0
+    except Exception:
+        return False
 
 
 def composite(overlay_png: Path, left_mp4: Path, right_mp4: Path, out: Path,
@@ -669,6 +767,30 @@ def main() -> None:
                     help="quality/size trade-off: lossless > high > balanced > compact (default high)")
     ap.add_argument("--nvenc", action="store_true",
                     help="(deprecated) shorthand for --encoder nvenc_h264")
+    # ---- visual tweaks (danser HUD / background / cursor), all opt-in --------
+    ap.add_argument("--bg-dim", type=float, default=0.95,
+                    help="background dim 0-1 (0=full bg, 1=black; default 0.95)")
+    ap.add_argument("--bg-blur", type=float, default=0.0,
+                    help="background blur 0-1 (0=off; default 0)")
+    ap.add_argument("--no-storyboards", action="store_true", help="don't load beatmap storyboards")
+    ap.add_argument("--videos", action="store_true", help="load the beatmap's background video")
+    ap.add_argument("--bloom", action="store_true", help="danser bloom/glow effect")
+    ap.add_argument("--hit-lighting", action="store_true", help="flash hit lighting on each hit")
+    ap.add_argument("--aim-error", action="store_true", help="show the aim-error scatter meter")
+    ap.add_argument("--pp-components", action="store_true", help="break the pp counter into aim/speed/acc")
+    ap.add_argument("--prominent-ur", action="store_true", help="enlarge + add decimals to the unstable rate")
+    ap.add_argument("--ignore-sample-volume", action="store_true",
+                    help="ignore the map's per-section hitsound volume changes")
+    ap.add_argument("--show-mods", action="store_true", help="show each side's mods badge")
+    ap.add_argument("--cursor-size", type=float, default=0.0,
+                    help="cursor size in osu!px (0 = danser default 12)")
+    ap.add_argument("--trail-length", type=float, default=1.0,
+                    help="cursor-trail length multiplier (1.0 = danser default)")
+    ap.add_argument("--hide-pp", action="store_true", help="hide the pp counter")
+    ap.add_argument("--hide-hitcounts", action="store_true", help="hide the 300/100/50/miss counts")
+    ap.add_argument("--hide-hiterror", action="store_true", help="hide the hit-error bar")
+    ap.add_argument("--hide-keys", action="store_true", help="hide the key overlay")
+    ap.add_argument("--hide-combo", action="store_true", help="hide the combo counter")
     ap.add_argument("--skip-render", action="store_true")
     ap.add_argument("--out", default="overlay_final.mp4")
     ap.add_argument("--png", default="overlay_base.png")
@@ -758,12 +880,26 @@ def main() -> None:
     print(f"  audio: P1 music {lm:.2f} / hits {lh:.2f}  ·  P2 music {rm:.2f} / hits {rh:.2f}")
 
     skin_hits = not args.beatmap_hitsounds
+    vis = {
+        "bg_dim": args.bg_dim, "bg_blur": args.bg_blur,
+        "storyboards": not args.no_storyboards, "videos": args.videos,
+        "bloom": args.bloom, "hit_lighting": args.hit_lighting,
+        "aim_error": args.aim_error, "pp_components": args.pp_components,
+        "prominent_ur": args.prominent_ur, "ignore_sample_volume": args.ignore_sample_volume,
+        "show_mods": args.show_mods, "cursor_size": args.cursor_size,
+        "trail_length": args.trail_length,
+        "show_pp": not args.hide_pp, "show_hitcounts": not args.hide_hitcounts,
+        "show_hiterror": not args.hide_hiterror, "show_keys": not args.hide_keys,
+        "show_combo": not args.hide_combo,
+    }
     left_patch = _render_patch(match.left.accent, skin=args.left_skin, songs_dir=args.songs_dir,
                                skins_dir=args.skins_dir, music_vol=lm,
-                               hit_vol=lh, master_vol=args.master_volume, force_skin_hits=skin_hits)
+                               hit_vol=lh, master_vol=args.master_volume, force_skin_hits=skin_hits,
+                               vis=vis)
     right_patch = _render_patch(match.right.accent, skin=args.right_skin, songs_dir=args.songs_dir,
                                 skins_dir=args.skins_dir, music_vol=rm,
-                                hit_vol=rh, master_vol=args.master_volume, force_skin_hits=skin_hits)
+                                hit_vol=rh, master_vol=args.master_volume, force_skin_hits=skin_hits,
+                                vis=vis)
     print(f"  danser panel resolution: {L.dz_w}x{L.dz_h} (no crop)  ·  stats tinted per side")
 
     if not args.skip_render:
@@ -798,6 +934,18 @@ def main() -> None:
     # resolve the encoder (--nvenc is a legacy shorthand for nvenc_h264)
     encoder = "nvenc_h264" if (args.nvenc and args.encoder == "x264") else args.encoder
     quality = args.quality
+
+    # x264 (CPU) is the reliable default; the NVENC options are an opt-in. If the
+    # chosen GPU encoder can't actually open here (e.g. av1_nvenc needs a newer
+    # NVIDIA driver than installed), fall back to x264 so the render still finishes
+    # instead of dying minutes in at the composite step.
+    if encoder != "x264" and not _encoder_available(encoder):
+        print(f"  ! encoder '{ENCODERS[encoder]['label']}' isn't usable on this "
+              f"system — your GPU driver may be too old for it. Falling back to "
+              f"x264 (CPU). Pick NVENC H.264/HEVC in Settings if your driver "
+              f"supports those, or update your NVIDIA driver for AV1.")
+        encoder = "x264"
+
     print(f"  encoder: {ENCODERS[encoder]['label']}  ·  quality: {quality}")
 
     out = Path(args.out)

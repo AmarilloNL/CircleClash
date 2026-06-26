@@ -23,6 +23,8 @@ import os
 import re
 import shutil
 import sys
+import time
+import html as ihtml
 import tempfile
 import zipfile
 from pathlib import Path
@@ -30,13 +32,13 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, Signal, QObject, QThread, QRectF
 from PySide6.QtGui import (
     QFont, QDragEnterEvent, QDropEvent, QPainter, QColor,
-    QLinearGradient, QRadialGradient, QPen, QBrush, QFontMetrics,
+    QLinearGradient, QRadialGradient, QPen, QBrush, QFontMetrics, QTextCursor,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
     QVBoxLayout, QHBoxLayout, QGridLayout, QFileDialog, QPlainTextEdit,
     QProgressBar, QDialog, QDoubleSpinBox, QCheckBox, QFormLayout, QFrame,
-    QMessageBox, QGroupBox, QComboBox, QSlider, QScrollArea,
+    QMessageBox, QGroupBox, QComboBox, QSlider, QScrollArea, QTabWidget,
 )
 
 try:
@@ -55,6 +57,8 @@ PIPELINE = HERE / "make_overlay_video.py"
 PINK = "#ff66ab"
 ICE = "#66d9ff"
 GOLD = "#ffd24a"
+GREEN = "#7fe0a0"
+RED = "#ff6b81"
 INK = "#0a0a0d"
 INK2 = "#101015"
 PANEL = "#14141b"
@@ -129,6 +133,23 @@ DEFAULT_CONFIG = {
     "right_music_volume": 0,
     "right_hitsound_volume": 100,
     "master_volume": 100,
+    # --- visual tweaks (danser HUD / background / cursor) ---
+    "vis_bg_style": "dark",          # dark | dimmed | visible | blurred
+    "vis_bloom": False,
+    "vis_hit_lighting": False,
+    "vis_aim_error": False,
+    "vis_pp_components": False,
+    "vis_prominent_ur": False,
+    "vis_show_mods": False,
+    "vis_ignore_sample_volume": False,
+    "vis_no_storyboards": False,
+    "vis_cursor_size": 100,          # percent of danser default (12 osu!px)
+    "vis_trail_length": 100,         # percent of danser default
+    "vis_show_pp": True,
+    "vis_show_hitcounts": True,
+    "vis_show_hiterror": True,
+    "vis_show_keys": True,
+    "vis_show_combo": True,
     "welcomed": False,
 }
 
@@ -204,6 +225,12 @@ def _theme_qss() -> str:
         QPlainTextEdit#logview{{background:#08080c;color:#b9b9c6;
             font-family:{MONO_FONT};font-size:11px;border:1px solid {LINE};border-radius:10px;}}
         QScrollArea{{border:none;background:transparent;}}
+        QTabWidget#dlgTabs::pane{{border:none;background:transparent;}}
+        QTabBar{{background:transparent;}}
+        QTabBar::tab{{background:transparent;color:{MUTED};padding:8px 14px;margin:0 2px;
+            border:none;border-bottom:2px solid transparent;font-size:12px;}}
+        QTabBar::tab:hover{{color:{TXT};}}
+        QTabBar::tab:selected{{color:{TXT};border-bottom:2px solid {PINK};}}
         QScrollBar:vertical{{background:transparent;width:10px;margin:2px;}}
         QScrollBar::handle:vertical{{background:#2c2c38;border-radius:5px;min-height:30px;}}
         QScrollBar::handle:vertical:hover{{background:#3a3a48;}}
@@ -553,13 +580,13 @@ class SettingsDialog(QDialog):
         hl.addWidget(ht); hl.addWidget(hs)
         outer.addWidget(header)
 
-        # --- scrollable body ---
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
-        content = QWidget()
-        cl = QVBoxLayout(content); cl.setContentsMargins(24, 18, 24, 20); cl.setSpacing(8)
+        # --- tabbed body ---
+        tabs = QTabWidget()
+        tabs.setObjectName("dlgTabs")
+        tabs.setDocumentMode(True)
 
         # Paths
-        cl.addWidget(self._section("Paths"))
+        pl = self._tab(tabs, "Paths")
         pf = self._form()
         self.danser_bin = self._file_row(pf, "danser binary", cfg["danser_bin"], pick_file=True)
         self.danser_video = self._file_row(pf, "danser video output dir", cfg["danser_video_dir"], pick_file=False)
@@ -567,23 +594,24 @@ class SettingsDialog(QDialog):
         self.songs = self._file_row(pf, "osu! Songs folder (your library)", cfg["songs_dir"], pick_file=False)
         self.skins = self._file_row(pf, "osu! Skins folder", cfg.get("skins_dir", ""), pick_file=False)
         self.output = self._file_row(pf, "output folder", cfg["output_dir"], pick_file=False)
-        cl.addLayout(pf)
+        pl.addLayout(pf)
+        pl.addWidget(self._hint("The packaged app fills in danser and ffmpeg for you."))
+        pl.addStretch(1)
 
         # osu! API
-        cl.addSpacing(6)
-        cl.addWidget(self._section("osu! API · optional"))
+        al = self._tab(tabs, "osu! API")
         af = self._form()
         self.cid = QLineEdit(cfg["api_client_id"])
         self.csecret = QLineEdit(cfg["api_client_secret"]); self.csecret.setEchoMode(QLineEdit.Password)
         af.addRow("client id", self.cid)
         af.addRow("client secret", self.csecret)
-        cl.addLayout(af)
-        cl.addWidget(self._hint("Optional, but enables avatars, ranks, flags and pp. Register a "
+        al.addLayout(af)
+        al.addWidget(self._hint("Optional, but enables avatars, ranks, flags and pp. Register a "
                                 "personal OAuth app at osu! → Settings → OAuth."))
+        al.addStretch(1)
 
         # Timing
-        cl.addSpacing(6)
-        cl.addWidget(self._section("Timing"))
+        tl = self._tab(tabs, "Timing")
         tf = self._form()
         self.tail = QDoubleSpinBox(); self.tail.setRange(0, 30); self.tail.setValue(cfg["tail_seconds"]); self.tail.setSuffix(" s")
         self.hold = QDoubleSpinBox(); self.hold.setRange(0, 30); self.hold.setValue(cfg["endcard_seconds"]); self.hold.setSuffix(" s")
@@ -592,11 +620,11 @@ class SettingsDialog(QDialog):
         tf.addRow("gameplay tail after last note", self.tail)
         tf.addRow("end-card hold", self.hold)
         tf.addRow("results animation speed", self.espeed)
-        cl.addLayout(tf)
+        tl.addLayout(tf)
+        tl.addStretch(1)
 
         # Encoding
-        cl.addSpacing(6)
-        cl.addWidget(self._section("Encoding"))
+        el = self._tab(tabs, "Encoding")
         ef = self._form()
         enc_default = cfg.get("encoder") or ("nvenc_h264" if cfg.get("nvenc") else "x264")
         self.encoder = QComboBox()
@@ -615,22 +643,24 @@ class SettingsDialog(QDialog):
         self.quality.setToolTip("Quality vs file-size trade-off. 'high' is visually clean; "
                                 "'compact' trades some quality for much smaller files.")
         ef.addRow("quality", self.quality)
-        cl.addLayout(ef)
+        el.addLayout(ef)
         self.nofail = QCheckBox("auto-fix osu!lazer false fails")
         self.nofail.setChecked(cfg.get("no_fail", True))
         self.nofail.setToolTip("Detects osu!lazer replays (which danser's stable HP model can "
                                "falsely show as failed) and renders just those as NoFail. "
                                "osu!stable replays are always left exactly as recorded.")
-        cl.addWidget(self.nofail)
+        el.addWidget(self.nofail)
+        el.addWidget(self._hint("x264 (CPU) works everywhere; if an NVENC encoder isn't supported "
+                                "by your GPU/driver, CircleClash falls back to x264 automatically."))
+        el.addStretch(1)
 
         # Audio
-        cl.addSpacing(6)
-        cl.addWidget(self._section("Audio"))
+        aul = self._tab(tabs, "Audio")
         self.skinhits = QCheckBox("force skin hitsounds (ignore the beatmap's hitsounds)")
         self.skinhits.setChecked(cfg.get("force_skin_hits", True))
         self.skinhits.setToolTip("Use the chosen skin's hitsounds for every map instead of the "
                                  "samples baked into each beatmap, for a consistent sound.")
-        cl.addWidget(self.skinhits)
+        aul.addWidget(self.skinhits)
         sf = self._form()
         self.vol_l_music = self._slider(cfg.get("left_music_volume", cfg.get("music_volume", 100)))
         self.vol_l_hit = self._slider(cfg.get("left_hitsound_volume", cfg.get("hitsound_volume", 100)))
@@ -642,14 +672,56 @@ class SettingsDialog(QDialog):
         sf.addRow("P2 music", self.vol_r_music["w"])
         sf.addRow("P2 hitsounds", self.vol_r_hit["w"])
         sf.addRow("master", self.vol_master["w"])
-        cl.addLayout(sf)
-        cl.addWidget(self._hint("Both players play the same song, so P2 music defaults to 0 to "
-                                "avoid doubling the track. Turn it up to crossfade, or mute a "
-                                "side's hitsounds to hear only one player."))
+        aul.addLayout(sf)
+        aul.addWidget(self._hint("Both players play the same song, so P2 music defaults to 0 to "
+                                 "avoid doubling the track. Turn it up to crossfade, or mute a "
+                                 "side's hitsounds to hear only one player."))
+        aul.addStretch(1)
 
-        cl.addStretch(1)
-        scroll.setWidget(content)
-        outer.addWidget(scroll, 1)
+        # Visual
+        vl = self._tab(tabs, "Visual")
+        vf = self._form()
+        self.bgstyle = QComboBox()
+        for key, label in (("dark", "Dark (default)"), ("dimmed", "Dimmed background"),
+                           ("visible", "Background visible"), ("blurred", "Background blurred")):
+            self.bgstyle.addItem(label, key)
+        bi = self.bgstyle.findData(cfg.get("vis_bg_style", "dark"))
+        self.bgstyle.setCurrentIndex(bi if bi >= 0 else 0)
+        self.bgstyle.setToolTip("How much of the beatmap background shows behind the playfield.")
+        vf.addRow("background", self.bgstyle)
+        self.cursorsize = self._range_slider(cfg.get("vis_cursor_size", 100), 50, 200)
+        self.traillen = self._range_slider(cfg.get("vis_trail_length", 100), 25, 200)
+        vf.addRow("cursor size", self.cursorsize["w"])
+        vf.addRow("cursor trail", self.traillen["w"])
+        vl.addLayout(vf)
+
+        def _chk(text, key, default, tip=""):
+            c = QCheckBox(text); c.setChecked(cfg.get(key, default))
+            if tip:
+                c.setToolTip(tip)
+            vl.addWidget(c)
+            return c
+        self.bloom        = _chk("bloom / glow effect", "vis_bloom", False)
+        self.hitlighting  = _chk("hit lighting (flash on each hit)", "vis_hit_lighting", False)
+        self.aimerror     = _chk("aim-error scatter meter", "vis_aim_error", False,
+                                 "danser's aim-error plot, anchored top-left of each panel.")
+        self.ppcomponents = _chk("pp breakdown (aim / speed / acc)", "vis_pp_components", False)
+        self.prominentur  = _chk("prominent unstable rate", "vis_prominent_ur", False,
+                                 "Enlarge the UR readout and show 2 decimals.")
+        self.showmods     = _chk("show each side's mods badge", "vis_show_mods", False)
+        self.ignsamplevol = _chk("ignore hitsound volume changes", "vis_ignore_sample_volume", False,
+                                 "Keep hitsounds at a constant level instead of following the "
+                                 "map's per-section volume.")
+        self.nostoryboard = _chk("disable storyboards", "vis_no_storyboards", False)
+        vl.addWidget(self._hint("HUD elements (uncheck to hide). Score + accuracy always show."))
+        self.hud_pp        = _chk("pp counter", "vis_show_pp", True)
+        self.hud_hitcounts = _chk("300 / 100 / 50 / miss counts", "vis_show_hitcounts", True)
+        self.hud_hiterror  = _chk("hit-error bar", "vis_show_hiterror", True)
+        self.hud_keys      = _chk("key overlay", "vis_show_keys", True)
+        self.hud_combo     = _chk("combo counter", "vis_show_combo", True)
+        vl.addStretch(1)
+
+        outer.addWidget(tabs, 1)
 
         # --- footer band ---
         footer = QWidget()
@@ -672,6 +744,19 @@ class SettingsDialog(QDialog):
     def _section(self, text: str) -> QLabel:
         lbl = QLabel(text); lbl.setProperty("role", "section")
         return lbl
+
+    def _tab(self, tabs: QTabWidget, title: str) -> QVBoxLayout:
+        """Create a scrollable page in the tab widget and return its layout."""
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(22, 18, 22, 18)
+        lay.setSpacing(8)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(page)
+        tabs.addTab(scroll, title)
+        return lay
 
     def _hint(self, text: str) -> QLabel:
         lbl = QLabel(text); lbl.setWordWrap(True)
@@ -703,6 +788,14 @@ class SettingsDialog(QDialog):
         w = QWidget(); w.setLayout(row)
         return {"s": s, "w": w}
 
+    def _range_slider(self, value, lo, hi):
+        s = QSlider(Qt.Horizontal); s.setRange(lo, hi); s.setValue(int(value))
+        lbl = QLabel(f"{int(value)}%"); lbl.setFixedWidth(46)
+        s.valueChanged.connect(lambda v: lbl.setText(f"{v}%"))
+        row = QHBoxLayout(); row.addWidget(s); row.addWidget(lbl)
+        w = QWidget(); w.setLayout(row)
+        return {"s": s, "w": w}
+
     def result_config(self) -> dict:
         return {
             "danser_bin": self.danser_bin.text().strip(),
@@ -725,6 +818,22 @@ class SettingsDialog(QDialog):
             "right_music_volume": self.vol_r_music["s"].value(),
             "right_hitsound_volume": self.vol_r_hit["s"].value(),
             "master_volume": self.vol_master["s"].value(),
+            "vis_bg_style": self.bgstyle.currentData(),
+            "vis_cursor_size": self.cursorsize["s"].value(),
+            "vis_trail_length": self.traillen["s"].value(),
+            "vis_bloom": self.bloom.isChecked(),
+            "vis_hit_lighting": self.hitlighting.isChecked(),
+            "vis_aim_error": self.aimerror.isChecked(),
+            "vis_pp_components": self.ppcomponents.isChecked(),
+            "vis_prominent_ur": self.prominentur.isChecked(),
+            "vis_show_mods": self.showmods.isChecked(),
+            "vis_ignore_sample_volume": self.ignsamplevol.isChecked(),
+            "vis_no_storyboards": self.nostoryboard.isChecked(),
+            "vis_show_pp": self.hud_pp.isChecked(),
+            "vis_show_hitcounts": self.hud_hitcounts.isChecked(),
+            "vis_show_hiterror": self.hud_hiterror.isChecked(),
+            "vis_show_keys": self.hud_keys.isChecked(),
+            "vis_show_combo": self.hud_combo.isChecked(),
         }
 
 
@@ -776,6 +885,90 @@ class ProgressTracker:
         return None, None
 
 
+class LogRouter:
+    """Classify a raw pipeline/danser output line into a tidy op for the clean log.
+
+    Returns a list of (kind, value) ops; kind is one of:
+      "phase" (value=name)   — a new stage begins
+      "prog"  (value=int %)  — render progress for the current stage
+      "ok" / "info" / "warn" / "err" (value=text) — standalone lines
+    An empty list means: drop from the clean view (still kept for verbose).
+    """
+    # danser's chatty internals — never shown in the clean view
+    _NOISE = (
+        "SettingsManager:", "ApiConnector:", "Current config:", "DatabaseManager:",
+        "Initializing", "Initialized", "GL Vendor", "GL Renderer", "GL Version",
+        "GLSL Version", "GL Extensions", "BASS", "Quicksand", "SkinManager:",
+        "Creating window", "Window created", "OpenGL", "GLFW", "loaded!",
+    )
+
+    def feed(self, line: str):
+        s = line.strip()
+        if not s:
+            return []
+
+        # --- danser render progress (with -preciseprogress) -> live % ---
+        m = re.search(r"Progress:\s*(\d+)\s*%", s)
+        if m:
+            return [("prog", int(m.group(1)))]
+
+        # --- pipeline phase markers ---
+        if s.startswith("Assembling match data"):
+            return [("phase", "Reading replays & match data")]
+        if s.startswith("Rendering overlay chrome"):
+            return [("phase", "Building overlay")]
+        if s.startswith("Staging beatmap into"):
+            return [("phase", "Staging beatmap")]
+        if "→ rendering" in s and "ov_left" in s:
+            return [("phase", "Rendering P1 gameplay")]
+        if "→ rendering" in s and "ov_right" in s:
+            return [("phase", "Rendering P2 gameplay")]
+        if "compositing gameplay" in s:
+            return [("phase", "Compositing gameplay + overlay")]
+        if s.startswith("rendering end card") or "rendering end card" in s:
+            return [("phase", "Rendering results card")]
+        if "joining gameplay" in s:
+            return [("phase", "Joining gameplay + results")]
+
+        # --- standalone info / status lines worth keeping ---
+        if s.startswith("OK overlay_base"):
+            return [("ok", "overlay ready")]
+        mb = re.match(r"beatmap:\s*(.+)", s)
+        if mb:
+            return [("ok", f"beatmap {mb.group(1)}")]
+        if s.startswith("downloading set"):
+            return [("info", s)]
+        if "danser db refreshed" in s:
+            return [("info", "danser database refreshed")]
+        if s.startswith("audio:"):
+            return [("info", s)]
+        if "no-fail:" in s:
+            return [("info", s)]
+        if "·" in s and (" vs " in s):           # the "P1 vs P2 · Artist - Title ★SR" line
+            return [("info", s)]
+
+        # --- warnings / errors ---
+        if "No osu! API key" in s or "map metadata unavailable" in s:
+            return [("warn", "no osu! API key — rendering without avatars/ranks/pp")]
+        if "isn't usable on this system" in s or "Falling back to x264" in s:
+            return [("warn", "selected GPU encoder unavailable (driver too old) — "
+                             "falling back to x264")]
+        if "ffmpeg composite failed" in s or "Conversion failed" in s.strip():
+            return [("err", "video compositing failed — see verbose log for ffmpeg output")]
+        if s.startswith("panic:"):
+            reason = s[len("panic:"):].strip()
+            # keep it short: drop the long path, keep the human part
+            reason = re.sub(r"open .*/([^/]+):\s*", r"", reason) or reason
+            return [("err", f"danser crashed: {reason[:160]}")]
+        if "danser exited with code" in s:
+            return [("err", s)]
+        if re.match(r"(error|fatal|traceback|exception)\b", s, re.I):
+            return [("err", s[:160])]
+
+        # everything else (danser internals, the -sPatch command dump, GL spam) -> drop
+        return []
+
+
 # --------------------------------------------------------------------------- #
 # Main window
 # --------------------------------------------------------------------------- #
@@ -786,6 +979,8 @@ class MainWindow(QMainWindow):
         self.cfg = load_config()
         self.proc: QProcess | None = None
         self.tracker = ProgressTracker()
+        self._raw = []; self._clean = []
+        self._cur_phase = None; self._cur_phase_t = None; self._pending = []; self._live = False
         self._build()
         self._apply_theme()
         self.populate_skins()
@@ -982,13 +1177,19 @@ class MainWindow(QMainWindow):
         proot.addWidget(self.progress); proot.addWidget(self.status)
         root.addWidget(panel)
 
-        # log (collapsible)
+        # log (collapsible) + verbose toggle
+        logrow = QHBoxLayout(); logrow.setContentsMargins(0, 0, 0, 0)
         self.logToggle = QPushButton("Show log ▸"); self.logToggle.setCheckable(True)
         self.logToggle.clicked.connect(self._toggle_log)
         self.logToggle.setProperty("role", "link")
-        root.addWidget(self.logToggle)
+        self.verboseChk = QCheckBox("verbose")
+        self.verboseChk.setToolTip("Show the full raw danser/ffmpeg output instead of the tidy summary.")
+        self.verboseChk.toggled.connect(self._rebuild_log)
+        self.verboseChk.setVisible(False)
+        logrow.addWidget(self.logToggle); logrow.addStretch(1); logrow.addWidget(self.verboseChk)
+        root.addLayout(logrow)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setVisible(False)
-        self.log.setMaximumBlockCount(4000)
+        self.log.setMaximumBlockCount(8000)
         self.log.setObjectName("logview")
         self.log.setMinimumHeight(160)
         root.addWidget(self.log, 1)            # expands to fill when visible
@@ -1006,6 +1207,7 @@ class MainWindow(QMainWindow):
     def _toggle_log(self):
         on = self.logToggle.isChecked()
         self.log.setVisible(on)
+        self.verboseChk.setVisible(on)
         self.logToggle.setText("Hide log ▾" if on else "Show log ▸")
         # When the log is open the log itself takes the slack; when closed the
         # trailing stretch does, so the drop zones / panel never get stretched.
@@ -1140,6 +1342,28 @@ class MainWindow(QMainWindow):
         if ff and (Path(ff).exists() or shutil.which(ff)):
             pargs += ["--ffmpeg", ff]
 
+        # --- visual tweaks ---
+        c = self.cfg
+        bg_dim, bg_blur = {
+            "dark": (0.95, 0.0), "dimmed": (0.7, 0.0),
+            "visible": (0.3, 0.0), "blurred": (0.7, 0.6),
+        }.get(c.get("vis_bg_style", "dark"), (0.95, 0.0))
+        pargs += ["--bg-dim", str(bg_dim), "--bg-blur", str(bg_blur),
+                  "--cursor-size", str(round(12 * c.get("vis_cursor_size", 100) / 100, 2)),
+                  "--trail-length", str(round(c.get("vis_trail_length", 100) / 100, 3))]
+        for flag, key in (("--no-storyboards", "vis_no_storyboards"),
+                          ("--bloom", "vis_bloom"), ("--hit-lighting", "vis_hit_lighting"),
+                          ("--aim-error", "vis_aim_error"), ("--pp-components", "vis_pp_components"),
+                          ("--prominent-ur", "vis_prominent_ur"), ("--show-mods", "vis_show_mods"),
+                          ("--ignore-sample-volume", "vis_ignore_sample_volume")):
+            if c.get(key):
+                pargs += [flag]
+        for flag, key in (("--hide-pp", "vis_show_pp"), ("--hide-hitcounts", "vis_show_hitcounts"),
+                          ("--hide-hiterror", "vis_show_hiterror"), ("--hide-keys", "vis_show_keys"),
+                          ("--hide-combo", "vis_show_combo")):
+            if not c.get(key, True):
+                pargs += [flag]
+
         # Frozen (.exe): relaunch ourselves in pipeline mode. From source: run the
         # make_overlay_video.py script with the current interpreter.
         if getattr(sys, "frozen", False):
@@ -1157,6 +1381,14 @@ class MainWindow(QMainWindow):
             env.insert("OSU_CLIENT_SECRET", self.cfg["api_client_secret"])
 
         self.tracker = ProgressTracker()
+        self._router = LogRouter()
+        self._raw = []                 # every raw line (verbose view)
+        self._clean = []               # tidy html lines (clean view)
+        self._cur_phase = None
+        self._cur_phase_t = None
+        self._pending = []
+        self._live = False             # last clean line is an updatable progress line?
+        self._render_t0 = time.monotonic()
         self.progress.setValue(0)
         self.status.setText("Starting render…")
         self.log.clear()
@@ -1174,15 +1406,115 @@ class MainWindow(QMainWindow):
         self.cancelBtn.setEnabled(True)
         self.settingsBtn.setEnabled(False)
 
+    # ---- tidy log rendering ----
+    @staticmethod
+    def _line(text, color, bold=False, indent=0):
+        weight = "font-weight:600;" if bold else ""
+        pad = "&nbsp;" * indent
+        return f'<span style="color:{color};{weight}">{pad}{ihtml.escape(text)}</span>'
+
+    def _showing_clean(self) -> bool:
+        return not self.verboseChk.isChecked()
+
+    def _widget_replace_last(self, html):
+        c = self.log.textCursor()
+        c.movePosition(QTextCursor.End)
+        c.movePosition(QTextCursor.StartOfBlock, QTextCursor.KeepAnchor)
+        c.removeSelectedText()
+        c.insertHtml(html)
+        self.log.setTextCursor(c)
+        self.log.ensureCursorVisible()
+
+    def _clean_add(self, html):
+        self._clean.append(html); self._live = False
+        if self._showing_clean():
+            self.log.appendHtml(html); self.log.ensureCursorVisible()
+
+    def _phase_live(self, html):
+        if self._live:
+            self._clean[-1] = html
+            if self._showing_clean():
+                self._widget_replace_last(html)
+        else:
+            self._clean.append(html); self._live = True
+            if self._showing_clean():
+                self.log.appendHtml(html); self.log.ensureCursorVisible()
+
+    def _finalize_phase(self):
+        if self._cur_phase is None:
+            return
+        dur = time.monotonic() - (self._cur_phase_t or time.monotonic())
+        done = self._line(f"✓ {self._cur_phase}  ({dur:.0f}s)", GREEN)
+        if self._live:
+            self._clean[-1] = done; self._live = False
+            if self._showing_clean():
+                self._widget_replace_last(done)
+        else:
+            self._clean_add(done)
+        for sub in self._pending:           # sub-steps, grouped under the finished phase
+            self._clean_add(sub)
+        self._pending = []
+        self._cur_phase = None; self._cur_phase_t = None
+
+    def _apply_op(self, kind, val):
+        if kind == "phase":
+            self._finalize_phase()
+            self._cur_phase = val; self._cur_phase_t = time.monotonic(); self._pending = []
+            self._phase_live(self._line(f"⏳ {val}…", ICE, bold=True))
+        elif kind == "prog":
+            if self._cur_phase is not None:
+                self._phase_live(self._line(f"⏳ {self._cur_phase}…  {val}%", ICE, bold=True))
+        elif kind in ("ok", "info", "warn"):
+            sub = {"ok": self._line(f"✓ {val}", GREEN, indent=3),
+                   "info": self._line(val, MUTED, indent=3),
+                   "warn": self._line(f"⚠ {val}", GOLD, indent=3)}[kind]
+            if self._cur_phase is not None:
+                self._pending.append(sub)   # deferred until the phase line finalizes
+            else:
+                self._clean_add(sub)
+        elif kind == "err":
+            # the phase failed; drop its pending sub-steps and show the error plainly
+            self._pending = []; self._cur_phase = None; self._cur_phase_t = None; self._live = False
+            self._clean_add(self._line(f"✗ {val}", RED, bold=True))
+
+    def _rebuild_log(self):
+        """Switch the visible log between the tidy view and full raw output."""
+        self.log.clear()
+        if self.verboseChk.isChecked():
+            if self._raw:
+                self.log.appendPlainText("\n".join(self._raw))
+        else:
+            for h in self._clean:
+                self.log.appendHtml(h)
+        self.log.ensureCursorVisible()
+
     def _on_output(self):
         data = bytes(self.proc.readAllStandardOutput()).decode(errors="replace")
         for line in data.splitlines():
-            self.log.appendPlainText(line)
-            pct, status = self.tracker.update(line)
+            self._raw.append(line)
+            if self.verboseChk.isChecked():
+                self.log.appendPlainText(line)
+            pct, status = self.tracker.update(line)   # drives the bar + status label
             if pct is not None:
                 self.progress.setValue(pct)
             if status:
                 self.status.setText(status)
+            for kind, val in self._router.feed(line):  # drives the tidy log
+                self._apply_op(kind, val)
+
+    def _append_summary(self, total):
+        try:
+            size_s = f"{self._out_target.stat().st_size / 1_048_576:.1f} MB"
+        except Exception:
+            size_s = "—"
+        res = self.cfg.get("resolution", "1080p")
+        enc = self.cfg.get("encoder", "x264"); q = self.cfg.get("quality", "high")
+        mm, ss = divmod(int(total), 60)
+        t_s = f"{mm}m {ss:02d}s" if mm else f"{ss}s"
+        self._clean_add(self._line("─" * 28, LINE))
+        self._clean_add(self._line(f"✓ Done  ·  {self._out_target.name}  ·  {size_s}", GREEN, bold=True))
+        self._clean_add(self._line(f"{res} · {enc}/{q} · {t_s} total", MUTED, indent=3))
+        self._clean_add(self._line(str(self._out_target), MUTED, indent=3))
 
     def _on_finished(self, code, _status):
         ok = code == 0
@@ -1190,11 +1522,16 @@ class MainWindow(QMainWindow):
         self.cancelBtn.setEnabled(False)
         self.settingsBtn.setEnabled(True)
         self._refresh_enabled()
+        self._finalize_phase()
+        total = time.monotonic() - getattr(self, "_render_t0", time.monotonic())
         if ok:
             self.progress.setValue(100)
             self.status.setText(f"Done → {self._out_target.name}")
+            self._append_summary(total)
         else:
             self.status.setText(f"Render failed (exit {code}) — see log")
+            self._clean_add(self._line(f"✗ Render failed (exit {code}) — toggle 'verbose' for full output",
+                                       RED, bold=True))
             if not self.logToggle.isChecked():
                 self.logToggle.setChecked(True); self._toggle_log()
 

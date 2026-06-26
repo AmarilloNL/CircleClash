@@ -132,6 +132,7 @@ def render_replay(
         "-quickstart",      # skip intro, LeadInTime/LeadInHold = 0
         "-nodbcheck",       # don't rescan the song db every run
         "-noupdatecheck",
+        "-preciseprogress", # emit render progress in clean 1% increments
     ]
     if extra_args:
         cmd.extend(extra_args)
