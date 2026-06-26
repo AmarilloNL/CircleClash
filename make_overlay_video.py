@@ -48,6 +48,11 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+# On Windows, console apps (danser, ffmpeg) spawned from the windowed GUI would each
+# pop up their own CMD window. CREATE_NO_WINDOW suppresses that; their stdout/stderr
+# are inherited from us, so the output still flows into the GUI's render log.
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
 # When running inside a frozen build (the .exe relaunched in --run-pipeline mode),
 # Chromium is bundled inside the packaged Playwright. PLAYWRIGHT_BROWSERS_PATH=0
 # tells Playwright to load the browser from the package itself rather than a
@@ -488,7 +493,8 @@ def _encoder_available(encoder: str) -> bool:
              "-pix_fmt", "yuv420p", "-frames:v", "1", "-c:v", codec, "-f", "null", "-"]
     try:
         r = subprocess.run(probe, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=30)
+                           stderr=subprocess.DEVNULL, timeout=30,
+                           creationflags=_NO_WINDOW)
         return r.returncode == 0
     except Exception:
         return False
@@ -533,7 +539,7 @@ def composite(overlay_png: Path, left_mp4: Path, right_mp4: Path, out: Path,
     cmd += _venc(encoder, quality) + ["-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2", str(out)]
     print(f"\n  -> compositing gameplay: {out}"
           + (f"  (trimmed to {trim_to:.1f}s)" if trim_to else ""))
-    if subprocess.run(cmd).returncode != 0:
+    if subprocess.run(cmd, creationflags=_NO_WINDOW).returncode != 0:
         raise SystemExit("ffmpeg composite failed.")
 
 
@@ -693,7 +699,7 @@ def render_endcard_video(match: MatchData, cache: Path, out_mp4: Path,
         "-c:a", "aac", "-b:a", "256k", "-t", f"{total}",
         str(out_mp4),
     ]
-    if subprocess.run(cmd).returncode != 0:
+    if subprocess.run(cmd, creationflags=_NO_WINDOW).returncode != 0:
         raise SystemExit("ffmpeg end-card assembly failed.")
 
     # the end card mp4 now holds everything; drop the hundreds of PNG frames so a
@@ -709,7 +715,7 @@ def concat_videos(gameplay: Path, endcard: Path, out: Path,
     listfile.write_text(f"file '{gameplay.resolve()}'\nfile '{endcard.resolve()}'\n")
     copy_cmd = [FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(listfile), "-c", "copy", str(out)]
     print(f"\n  -> joining gameplay + end card: {out}")
-    if subprocess.run(copy_cmd).returncode == 0:
+    if subprocess.run(copy_cmd, creationflags=_NO_WINDOW).returncode == 0:
         listfile.unlink(missing_ok=True)
         return
     # fallback: re-encode concat (robust against any param mismatch), same encoder
@@ -719,7 +725,7 @@ def concat_videos(gameplay: Path, endcard: Path, out: Path,
              "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
              *_venc(encoder, quality),
              "-c:a", "aac", "-b:a", "256k", "-ar", "48000", str(out)]
-    if subprocess.run(reenc).returncode != 0:
+    if subprocess.run(reenc, creationflags=_NO_WINDOW).returncode != 0:
         raise SystemExit("ffmpeg concat failed.")
     listfile.unlink(missing_ok=True)
 
@@ -851,10 +857,15 @@ def main() -> None:
         print("\nchrome-only: open the PNG to review the design.")
         return
 
-    if not args.danser_video_dir:
-        raise SystemExit("--danser-video-dir is required for the full pipeline (or use --chrome-only).")
-    video_dir = Path(args.danser_video_dir)
     danser = sync_poc.find_danser(args.danser_bin)
+    # danser writes its recordings to a "videos" folder next to its binary. Derive
+    # that from the resolved binary so it always matches (the explicit flag is only an
+    # override for unusual setups); a stale/guessed path is what used to cause the
+    # "Couldn't find danser's output for 'ov_left'" failure.
+    if args.danser_video_dir:
+        video_dir = Path(args.danser_video_dir)
+    else:
+        video_dir = Path(danser).resolve().parent / "videos"
     staged_status = None
 
     # Stage just this match's map into the small render-songs folder danser reads

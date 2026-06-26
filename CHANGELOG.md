@@ -1,6 +1,25 @@
 # Changelog
 
-## v1.1.0
+## v1.1.2
+
+### Fixed
+- **No more CMD pop-up on Windows:** danser and ffmpeg no longer spawn their own console
+  windows during a render — their output flows into the in-app log, the same as on Linux.
+- **danser output folder is auto-derived** from the danser binary, fixing
+  *"Couldn't find danser's output for 'ov_left'"* when a stale path was stored.
+- **danser binary path auto-fills** in Settings after first-run setup, instead of looking empty.
+
+### Added
+- **App icon** (taskbar + window).
+
+### Changed
+- **Faster startup:** the app now ships as a one-folder build (zipped) instead of a single file,
+  so it no longer unpacks ~300-400 MB to a temp dir on every launch. Extract the zip and run
+  `CircleClash` / `CircleClash.exe` inside.
+- **Settings is tidier:** the duplicate *danser video output dir* field is gone — only the final
+  *output folder* remains.
+
+## v1.1.0 – v1.1.1
 
 ### Added — Visual options (Settings → Visual)
 All optional and off by default, so existing renders look the same unless you opt in.

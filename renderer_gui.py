@@ -32,7 +32,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, Signal, QObject, QThread, QRectF
 from PySide6.QtGui import (
     QFont, QDragEnterEvent, QDropEvent, QPainter, QColor,
-    QLinearGradient, QRadialGradient, QPen, QBrush, QFontMetrics, QTextCursor,
+    QLinearGradient, QRadialGradient, QPen, QBrush, QFontMetrics, QTextCursor, QIcon,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
@@ -53,6 +53,22 @@ except Exception:
 
 HERE = Path(__file__).resolve().parent
 PIPELINE = HERE / "make_overlay_video.py"
+
+
+def resource_path(name: str) -> Path:
+    """Resolve a bundled resource both from source and inside a PyInstaller build
+    (where data files live under sys._MEIPASS)."""
+    base = Path(getattr(sys, "_MEIPASS", HERE))
+    p = base / name
+    return p if p.exists() else HERE / name
+
+
+def app_icon() -> QIcon:
+    for name in ("icon.ico", "icon.png"):
+        p = resource_path(name)
+        if p.exists():
+            return QIcon(str(p))
+    return QIcon()
 
 PINK = "#ff66ab"
 ICE = "#66d9ff"
@@ -112,7 +128,6 @@ CONFIG_PATH = config_dir() / "config.json"
 
 DEFAULT_CONFIG = {
     "danser_bin": "",
-    "danser_video_dir": "",
     "ffmpeg_bin": "",
     "songs_dir": "",
     "skins_dir": "",
@@ -589,7 +604,6 @@ class SettingsDialog(QDialog):
         pl = self._tab(tabs, "Paths")
         pf = self._form()
         self.danser_bin = self._file_row(pf, "danser binary", cfg["danser_bin"], pick_file=True)
-        self.danser_video = self._file_row(pf, "danser video output dir", cfg["danser_video_dir"], pick_file=False)
         self.ffmpeg_bin = self._file_row(pf, "ffmpeg binary", cfg.get("ffmpeg_bin", ""), pick_file=True)
         self.songs = self._file_row(pf, "osu! Songs folder (your library)", cfg["songs_dir"], pick_file=False)
         self.skins = self._file_row(pf, "osu! Skins folder", cfg.get("skins_dir", ""), pick_file=False)
@@ -799,7 +813,6 @@ class SettingsDialog(QDialog):
     def result_config(self) -> dict:
         return {
             "danser_bin": self.danser_bin.text().strip(),
-            "danser_video_dir": self.danser_video.text().strip(),
             "ffmpeg_bin": self.ffmpeg_bin.text().strip(),
             "songs_dir": self.songs.text().strip(),
             "skins_dir": self.skins.text().strip(),
@@ -990,6 +1003,7 @@ class MainWindow(QMainWindow):
             self.cfg["welcomed"] = True
             save_config(self.cfg)
         self._resolve_ffmpeg()
+        self._resolve_danser()
         if not self.cfg["danser_bin"] or not self._have_ffmpeg():
             self._first_run_danser()
 
@@ -1010,6 +1024,24 @@ class MainWindow(QMainWindow):
             self.cfg["ffmpeg_bin"] = onpath
             save_config(self.cfg)
 
+    def _resolve_danser(self):
+        """Pick up a danser we already have (managed/portable copy) into config so the
+        Settings field shows it, without downloading. Mirrors _resolve_ffmpeg."""
+        cur = self.cfg.get("danser_bin", "")
+        if cur and Path(cur).exists():
+            return
+        if danser_setup is not None:
+            local = danser_setup.find_local_danser()
+            if local:
+                self.cfg["danser_bin"] = str(local)
+                save_config(self.cfg)
+
+    def _have_danser(self) -> bool:
+        cur = self.cfg.get("danser_bin", "")
+        if cur and Path(cur).exists():
+            return True
+        return bool(danser_setup and danser_setup.find_local_danser())
+
     def _have_ffmpeg(self) -> bool:
         cur = self.cfg.get("ffmpeg_bin", "")
         if cur and (Path(cur).exists() or shutil.which(cur)):
@@ -1023,8 +1055,6 @@ class MainWindow(QMainWindow):
             local = danser_setup.find_local_danser()
             if local:
                 self.cfg["danser_bin"] = str(local)
-                if not self.cfg.get("danser_video_dir"):
-                    self.cfg["danser_video_dir"] = str(Path(local).resolve().parent / "videos")
                 save_config(self.cfg)
                 self._refresh_enabled()
                 if self._have_ffmpeg():
@@ -1052,8 +1082,8 @@ class MainWindow(QMainWindow):
                 return
         # fallback: manual
         QMessageBox.information(self, "First-time setup",
-                                "Point CircleClash at your danser binary, its video output "
-                                "folder, and your osu! Songs folder to get started.")
+                                "Point CircleClash at your danser binary and your osu! Songs "
+                                "folder to get started.")
         self.open_settings()
 
     def download_danser(self):
@@ -1081,8 +1111,6 @@ class MainWindow(QMainWindow):
     def _on_danser_done(self, path, ffmpeg_path):
         self._setup_thread.quit(); self._setup_thread.wait()
         self.cfg["danser_bin"] = path
-        if not self.cfg.get("danser_video_dir"):
-            self.cfg["danser_video_dir"] = str(Path(path).resolve().parent / "videos")
         if ffmpeg_path:
             self.cfg["ffmpeg_bin"] = ffmpeg_path
         save_config(self.cfg)
@@ -1274,8 +1302,7 @@ class MainWindow(QMainWindow):
         return None if (not t or t.startswith("(default")) else t
 
     def _refresh_enabled(self, *_):
-        ready = bool(self.leftZone.path and self.rightZone.path
-                     and self.cfg.get("danser_bin") and self.cfg.get("danser_video_dir"))
+        ready = bool(self.leftZone.path and self.rightZone.path and self._have_danser())
         self.renderBtn.setEnabled(ready and self.proc is None)
 
     def _out_path(self) -> Path:
@@ -1307,7 +1334,6 @@ class MainWindow(QMainWindow):
             self.leftZone.path, self.rightZone.path,
             "--title", self.titleEdit.text() or "friendly · bo1",
             "--danser-bin", self.cfg["danser_bin"],
-            "--danser-video-dir", self.cfg["danser_video_dir"],
             "--out", str(out),
             "--tail-seconds", str(self.cfg["tail_seconds"]),
             "--endcard-seconds", str(self.cfg["endcard_seconds"]),
@@ -1555,9 +1581,18 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AmarilloNL.CircleClash")
+        except Exception:
+            pass
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI", 10))
+    icon = app_icon()
+    app.setWindowIcon(icon)
     w = MainWindow()
+    w.setWindowIcon(icon)
     w.show()
     sys.exit(app.exec())
 

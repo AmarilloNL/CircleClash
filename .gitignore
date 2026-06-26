@@ -16,6 +16,8 @@ _gameplay.mp4
 _endcard.mp4
 _concat_list.txt
 _endcard_frames/
+overlay_base.png
+overlay_debug.html
 *.mp4
 *.osr
 

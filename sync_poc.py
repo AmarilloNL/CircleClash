@@ -43,6 +43,11 @@ from pathlib import Path
 
 from osr_parser import Mods, ReplayInfo, parse_replay
 
+# On Windows, danser is a console app; spawned from the windowed GUI it would pop up
+# its own CMD window. CREATE_NO_WINDOW suppresses that while keeping its output on our
+# inherited stdout (so it shows in the GUI render log).
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
 
 # --------------------------------------------------------------------------- #
 # Mod / speed helpers
@@ -139,7 +144,7 @@ def render_replay(
 
     print(f"  → rendering {replay_path.name}  (out: {out_name})")
     print(f"    {' '.join(cmd)}")
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, creationflags=_NO_WINDOW)
     if result.returncode != 0:
         raise SystemExit(
             f"danser exited with code {result.returncode} for {replay_path.name}. "
@@ -175,7 +180,7 @@ def probe_duration(path: Path) -> float:
             "-of", "default=noprint_wrappers=1:nokey=1",
             str(path),
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, creationflags=_NO_WINDOW,
     )
     try:
         return float(out.stdout.strip())
@@ -192,7 +197,7 @@ def probe_fps(path: Path) -> float:
             "-of", "default=noprint_wrappers=1:nokey=1",
             str(path),
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, creationflags=_NO_WINDOW,
     )
     txt = out.stdout.strip()
     if "/" in txt:
@@ -235,7 +240,7 @@ def composite_hstack(left: Path, right: Path, out: Path) -> None:
         str(out),
     ]
     print(f"\n  → compositing side-by-side: {out}")
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, creationflags=_NO_WINDOW)
     if result.returncode != 0:
         raise SystemExit("ffmpeg hstack failed.")
 

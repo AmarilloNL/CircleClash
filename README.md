@@ -14,10 +14,11 @@ card at the end. Drop a `.osr` on each side, hit **Render**, get a shareable `.m
 ### Windows — just grab the app
 
 1. Go to the [**Releases**](https://github.com/AmarilloNL/CircleClash/releases) page and download
-   **`CircleClash-windows.exe`** from the latest release.
-2. Put it in its own folder (e.g. `Documents\CircleClash`) — on first run it creates a
-   `CircleClash-data` folder right next to it for everything it needs.
-3. Double-click it. That's it.
+   **`CircleClash-windows.zip`** from the latest release.
+2. Extract it into its own folder (e.g. `Documents\CircleClash`). Inside you'll find
+   `CircleClash.exe` next to a `_internal` folder — keep them together.
+3. Double-click `CircleClash.exe`. On first run it creates a `CircleClash-data` folder right next to
+   it for everything it needs.
 
 No Python, no ffmpeg install, nothing to add to your PATH. On first launch CircleClash downloads
 **danser-go** and **ffmpeg** automatically into that data folder, so the whole tool lives in one place
@@ -28,9 +29,9 @@ you can move or delete as a unit.
 
 ### Linux
 
-Download **`CircleClash-linux`** from [**Releases**](https://github.com/AmarilloNL/CircleClash/releases),
-`chmod +x CircleClash-linux`, and run it — it sets up danser and ffmpeg the same way. Prefer running
-from source? See the Linux instructions below.
+Download **`CircleClash-linux.zip`** from [**Releases**](https://github.com/AmarilloNL/CircleClash/releases),
+unzip it, then run `./CircleClash/CircleClash` (`chmod +x` it first if needed) — it sets up danser and
+ffmpeg the same way. Prefer running from source? See the Linux instructions below.
 
 ---
 
@@ -112,8 +113,8 @@ Next time, just `cd CircleClash`, run `source .venv/bin/activate`, then `python 
 
 ## Windows
 
-**You don't need this section to use CircleClash** — download `CircleClash-windows.exe` from
-[**Releases**](https://github.com/AmarilloNL/CircleClash/releases) and run it (see [Download](#download)).
+**You don't need this section to use CircleClash** — download `CircleClash-windows.zip` from
+[**Releases**](https://github.com/AmarilloNL/CircleClash/releases), extract it and run `CircleClash.exe` (see [Download](#download)).
 danser, ffmpeg and everything else are handled for you.
 
 <details>
@@ -207,7 +208,7 @@ A short welcome appears and checks your setup. Then:
 
 ## Settings reference
 
-- **Paths** — danser binary, danser video output dir, **ffmpeg binary**, your osu! Songs & Skins
+- **Paths** — danser binary, **ffmpeg binary**, your osu! Songs & Skins
   folders, output folder. (The packaged app fills in danser and ffmpeg for you.)
 - **osu! API** — optional client id/secret (avatars, ranks, flags, pp).
 - **Timing** — gameplay tail after the last note, end-card hold, results animation speed.
@@ -277,7 +278,7 @@ licenses and don't constrain this repository. CircleClash itself is released und
 ## For maintainers — building the apps
 
 A ready-to-use GitHub Actions workflow is included at `.github/workflows/build.yml`. It builds a
-**single-file** [PyInstaller](https://pyinstaller.org/) executable for **Windows** and **Linux** and
+**one-folder** [PyInstaller](https://pyinstaller.org/) app for **Windows** and **Linux**, zips it, and
 attaches them to the GitHub Release. To cut a release:
 
 ```bash
@@ -285,7 +286,7 @@ git tag v1.1.0
 git push origin v1.1.0
 ```
 
-The workflow then produces `CircleClash-windows.exe` and `CircleClash-linux` (one file each) and
+The workflow then produces `CircleClash-windows.zip` and `CircleClash-linux.zip` and
 uploads them to the release for that tag. You can also trigger a test build manually from the
 **Actions** tab.
 
@@ -293,10 +294,10 @@ How the packaging works (worth knowing if you tweak it):
 
 - **One executable, two roles.** The GUI relaunches itself with `--run-pipeline` to do the actual
   render, so a single PyInstaller build is both the app and its render worker.
-- **Single file (`--onefile`).** Convenient to share, but the exe unpacks to a temp folder on launch;
-  because of the self-relaunch above, that happens once for the GUI and again for each render, adding
-  a few seconds on top of a large (~300-400 MB) bundle. If startup ever feels too slow, switch the
-  workflow to `--onedir` (a folder you zip) — it doesn't unpack on launch.
+- **One folder (`--onedir`), zipped.** The build is a folder (an executable next to an `_internal`
+  directory) that gets zipped for the release. Unlike `--onefile`, it doesn't unpack a ~300-400 MB
+  bundle to a temp dir on every launch, so it starts near-instantly — which matters here because the
+  self-relaunch above would otherwise pay that cost twice (GUI + each render).
 - **Chromium is bundled.** The overlay/results card is rendered with Playwright's Chromium, installed
   with `PLAYWRIGHT_BROWSERS_PATH=0` and collected via `--collect-all playwright`; the frozen app sets
   the same variable so it loads the bundled browser. *(For a much smaller build, the alternative is to
