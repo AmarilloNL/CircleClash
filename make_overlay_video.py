@@ -40,6 +40,14 @@ import time
 import urllib.request
 from pathlib import Path
 
+# Force UTF-8 stdio so the arrows/bullets/✓/× we print never crash on a Windows
+# console or pipe (which default to cp1252 and can't encode U+2192 and friends).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # When running inside a frozen build (the .exe relaunched in --run-pipeline mode),
 # Chromium is bundled inside the packaged Playwright. PLAYWRIGHT_BROWSERS_PATH=0
 # tells Playwright to load the browser from the package itself rather than a

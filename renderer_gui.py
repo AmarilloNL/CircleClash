@@ -1375,6 +1375,10 @@ class MainWindow(QMainWindow):
 
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONUNBUFFERED", "1")
+        # Force UTF-8 stdio in the worker so the arrows/bullets/✓ it prints don't crash
+        # on Windows (whose pipes/console default to cp1252).
+        env.insert("PYTHONUTF8", "1")
+        env.insert("PYTHONIOENCODING", "utf-8")
         if self.cfg.get("api_client_id"):
             env.insert("OSU_CLIENT_ID", self.cfg["api_client_id"])
         if self.cfg.get("api_client_secret"):
@@ -1565,17 +1569,22 @@ if __name__ == "__main__":
     # what lets a single PyInstaller build act as both the app and its worker.
     if len(sys.argv) > 1 and sys.argv[1] == "--run-pipeline":
         # In a --windowed frozen build PyInstaller can set stdio to None; reattach to
-        # the pipe QProcess handed us so the GUI can still read render progress.
-        if sys.stdout is None:
-            try:
-                sys.stdout = os.fdopen(1, "w", buffering=1)
-            except Exception:
-                sys.stdout = open(os.devnull, "w")
-        if sys.stderr is None:
-            try:
-                sys.stderr = os.fdopen(2, "w", buffering=1)
-            except Exception:
-                sys.stderr = open(os.devnull, "w")
+        # the pipe QProcess handed us. Force UTF-8 in every case — Windows pipes/consoles
+        # default to cp1252, which can't encode the arrows/bullets/✓ the pipeline prints
+        # (otherwise the render dies with a UnicodeEncodeError on the first '→').
+        for _fd, _name in ((1, "stdout"), (2, "stderr")):
+            _stream = getattr(sys, _name)
+            if _stream is None:
+                try:
+                    setattr(sys, _name, os.fdopen(_fd, "w", buffering=1,
+                                                  encoding="utf-8", errors="replace"))
+                except Exception:
+                    setattr(sys, _name, open(os.devnull, "w", encoding="utf-8"))
+            else:
+                try:
+                    _stream.reconfigure(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
         import make_overlay_video
         sys.argv = [sys.argv[0]] + sys.argv[2:]
         make_overlay_video.main()

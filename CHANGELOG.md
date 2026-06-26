@@ -22,6 +22,8 @@ All optional and off by default, so existing renders look the same unless you op
 - **Encoder fallback:** if the selected NVENC encoder can't open on your system (e.g. `av1_nvenc`
   needs a newer NVIDIA driver), CircleClash now detects it up front and automatically falls back to
   x264 so the render still finishes, instead of failing at the composite step.
+- **Windows render crash:** the worker no longer dies with a `UnicodeEncodeError` on Windows — its
+  output is now forced to UTF-8 so progress glyphs (→ · ✓ ×) can't break the cp1252 console/pipe.
 
 ### Notes
 - Background dim is now uniform across intro / gameplay / breaks (previously breaks brightened
