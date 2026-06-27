@@ -1,8 +1,11 @@
 # Changelog
 
-## v1.1.5
+## v1.2.0
 
 ### Fixed
+- **"Import .osk" buttons render cleanly:** the skin row now keeps the dropdown and its button
+  in their own full-width row (with a stable button width), so the button text no longer clips
+  or overlaps at certain window sizes.
 - **Composite step no longer fails with "file not found":** the app now always passes a real ffmpeg
   path to the render pipeline (resolved fresh from the managed copy), and the pipeline falls back to
   the ffmpeg danser bundles next to itself if needed — so the final video assembles even when there's

@@ -2,8 +2,8 @@
 # GitHub Release.
 #
 # Trigger it by pushing a version tag:
-#     git tag v1.1.5
-#     git push origin v1.1.5
+#     git tag v1.2.0
+#     git push origin v1.2.0
 # or run it by hand from the Actions tab ("Run workflow").
 #
 # Notes:
