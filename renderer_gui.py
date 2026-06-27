@@ -603,13 +603,54 @@ class SettingsDialog(QDialog):
         # Paths
         pl = self._tab(tabs, "Paths")
         pf = self._form()
-        self.danser_bin = self._file_row(pf, "danser binary", cfg["danser_bin"], pick_file=True)
-        self.ffmpeg_bin = self._file_row(pf, "ffmpeg binary", cfg.get("ffmpeg_bin", ""), pick_file=True)
+        # Show the actual installed binaries even if config somehow lost the path:
+        # resolve the managed/portable danser + ffmpeg live when the dialog opens.
+        danser_val = cfg.get("danser_bin", "")
+        if (not danser_val or not Path(danser_val).exists()) and danser_setup:
+            try:
+                loc = danser_setup.find_local_danser()
+                if loc:
+                    danser_val = str(loc)
+            except Exception:
+                pass
+        ffmpeg_val = cfg.get("ffmpeg_bin", "")
+        if (not ffmpeg_val or not Path(ffmpeg_val).exists()) and ffmpeg_setup:
+            try:
+                got = ffmpeg_setup.find_local_ffmpeg()
+                if got:
+                    ffmpeg_val = str(got[0])
+            except Exception:
+                pass
+        self.danser_bin = self._file_row(pf, "danser binary", danser_val, pick_file=True)
+        self.ffmpeg_bin = self._file_row(pf, "ffmpeg binary", ffmpeg_val, pick_file=True)
         self.songs = self._file_row(pf, "osu! Songs folder (your library)", cfg["songs_dir"], pick_file=False)
         self.skins = self._file_row(pf, "osu! Skins folder", cfg.get("skins_dir", ""), pick_file=False)
         self.output = self._file_row(pf, "output folder", cfg["output_dir"], pick_file=False)
         pl.addLayout(pf)
-        pl.addWidget(self._hint("The packaged app fills in danser and ffmpeg for you."))
+        # Diagnostic: spell out where we looked and what we found, so an empty danser
+        # field is explainable instead of mysterious.
+        diag = "The packaged app fills in danser and ffmpeg for you."
+        try:
+            if danser_setup and not danser_val:
+                root = Path(danser_setup.data_root())
+                found_any = None
+                try:
+                    for p in root.rglob("*"):
+                        if p.is_file() and p.name.lower().startswith("danser-cli"):
+                            found_any = p
+                            break
+                except Exception:
+                    pass
+                if found_any:
+                    diag = (f"danser is at {found_any} but wasn't auto-detected — "
+                            f"click the ⋯ button to select it.")
+                else:
+                    diag = (f"danser not found under {root / 'danser'}. It may still be "
+                            f"downloading or the download failed; reopen Settings later, "
+                            f"or use ⋯ to pick danser-cli.exe yourself.")
+        except Exception:
+            pass
+        pl.addWidget(self._hint(diag))
         pl.addStretch(1)
 
         # osu! API

@@ -1,20 +1,21 @@
-# Builds CircleClash with PyInstaller for Windows + Linux and attaches the result
-# to the GitHub Release.
+# Builds CircleClash with PyInstaller for Windows and attaches the result to the
+# GitHub Release.
 #
 # Trigger it by pushing a version tag:
-#     git tag v1.1.1
-#     git push origin v1.1.1
+#     git tag v1.1.2
+#     git push origin v1.1.2
 # or run it by hand from the Actions tab ("Run workflow").
 #
 # Notes:
-#  - Output is a ONE-FOLDER app per OS, zipped: CircleClash-windows.zip /
-#    CircleClash-linux.zip. Users extract the zip and run CircleClash(.exe) inside.
+#  - Output is a ONE-FOLDER app, zipped: CircleClash-windows.zip. Users extract the
+#    zip and run CircleClash.exe inside.
 #  - We use --onedir (not --onefile) on purpose: --onefile unpacks the whole bundle
 #    (incl. the ~300-400 MB Chromium) to a temp dir on EVERY launch, which is what made
 #    startup slow. --onedir extracts nothing at runtime, so it boots near-instantly.
 #  - Chromium (for the overlay) IS bundled via Playwright + --collect-all, using
 #    PLAYWRIGHT_BROWSERS_PATH=0 so it lives inside the packaged app.
 #  - danser-go and ffmpeg are NOT bundled; the app fetches them on first run.
+#  - Linux users build from source (see the README) -- no Linux release is published.
 
 name: build
 
@@ -28,18 +29,8 @@ permissions:
 
 jobs:
   build:
-    name: build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            asset: CircleClash-windows.zip
-            datasep: ';'
-          - os: ubuntu-latest
-            asset: CircleClash-linux.zip
-            datasep: ':'
+    name: build (windows)
+    runs-on: windows-latest
 
     steps:
       - name: Check out the code
@@ -72,29 +63,24 @@ jobs:
           --name CircleClash
           --icon icon.ico
           --collect-all playwright
-          --add-data "icon.ico${{ matrix.datasep }}."
-          --add-data "icon.png${{ matrix.datasep }}."
+          --add-data "icon.ico;."
+          --add-data "icon.png;."
           renderer_gui.py
         # PySide6 is handled by PyInstaller's built-in hook. make_overlay_video and the
         # other modules are picked up automatically because renderer_gui imports
         # make_overlay_video in its --run-pipeline branch.
 
-      - name: Zip the app folder (Linux)
-        if: runner.os == 'Linux'
-        run: cd dist && zip -r "../${{ matrix.asset }}" CircleClash
-
-      - name: Zip the app folder (Windows)
-        if: runner.os == 'Windows'
-        run: Compress-Archive -Path dist/CircleClash -DestinationPath "${{ matrix.asset }}"
+      - name: Zip the app folder
+        run: Compress-Archive -Path dist/CircleClash -DestinationPath "CircleClash-windows.zip"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
+          name: CircleClash-windows.zip
+          path: CircleClash-windows.zip
 
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.asset }}
+          files: CircleClash-windows.zip

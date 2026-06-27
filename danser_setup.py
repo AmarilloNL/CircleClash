@@ -79,6 +79,39 @@ def data_root() -> Path:
     return _data_root()
 
 
+def _per_user_root() -> Path:
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData/Local")
+    elif sys.platform == "darwin":
+        base = str(Path.home() / "Library/Application Support")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+    return Path(base) / "osu-renderer"
+
+
+def _candidate_data_roots() -> list[Path]:
+    """All data roots danser/ffmpeg might live under for *this* app copy: the active
+    one, the portable spot next to the exe (in case we fell back to per-user), and the
+    per-user spot (in case the active root is portable but a copy was installed per-user).
+    This does not cross to unrelated copies elsewhere on disk — pick those with ⋯."""
+    roots: list[Path] = [_data_root()]
+    if getattr(sys, "frozen", False):
+        roots.append(Path(sys.executable).resolve().parent / "CircleClash-data")
+    env = os.environ.get("CIRCLECLASH_PORTABLE")
+    if env and env not in ("0", "1"):
+        roots.append(Path(env) / "CircleClash-data")
+    roots.append(_per_user_root())
+    out: list[Path] = []
+    for r in roots:
+        try:
+            r = r.resolve()
+        except Exception:
+            pass
+        if r not in out:
+            out.append(r)
+    return out
+
+
 def danser_dir() -> Path:
     d = _data_root() / "danser"
     d.mkdir(parents=True, exist_ok=True)
@@ -99,12 +132,27 @@ def _bin_name() -> str:
 
 
 def find_local_danser() -> Path | None:
-    """Return a usable danser-cli we previously installed, if present."""
-    root = danser_dir()
-    target = _bin_name()
-    for p in root.rglob(target):
-        if p.is_file():
-            return p
+    """Return a usable danser-cli we previously installed, if present.
+
+    Searches every plausible data root (the active one, the exe-adjacent portable spot,
+    and the per-user spot), then the whole tree of each, matching the binary name
+    case-insensitively + with/without the platform suffix — so a copy installed under a
+    slightly different root still gets picked up instead of leaving the field empty."""
+    want = {"danser-cli.exe", "danser-cli", _bin_name().lower()}
+    for root in _candidate_data_roots():
+        for base in (root / "danser", root):
+            try:
+                for p in base.rglob(_bin_name()):
+                    if p.is_file():
+                        return p
+            except Exception:
+                pass
+            try:
+                for p in base.rglob("*"):
+                    if p.name.lower() in want and p.is_file():
+                        return p
+            except Exception:
+                pass
     return None
 
 

@@ -29,9 +29,8 @@ you can move or delete as a unit.
 
 ### Linux
 
-Download **`CircleClash-linux.zip`** from [**Releases**](https://github.com/AmarilloNL/CircleClash/releases),
-unzip it, then run `./CircleClash/CircleClash` (`chmod +x` it first if needed) — it sets up danser and
-ffmpeg the same way. Prefer running from source? See the Linux instructions below.
+There's no prebuilt Linux release — on Linux you run from source (it's a quick venv setup, and the
+app still provisions danser and ffmpeg itself). See [Linux — run from source](#linux--run-from-source) below.
 
 ---
 
@@ -50,10 +49,10 @@ only applies if you choose to run from source.
 
 ---
 
-## Linux — run from source (optional)
+## Linux — run from source
 
-> There's a prebuilt **`CircleClash-linux`** on the [Releases](https://github.com/AmarilloNL/CircleClash/releases)
-> page that needs none of this. The steps below are only for running from source.
+> On Linux you run CircleClash from source (no prebuilt release). It still downloads danser and ffmpeg
+> for you on first run.
 
 These steps use a **virtual environment**. On modern distros (Arch, Debian 12+, Fedora, …) a plain
 `pip install` into the system Python is blocked with an *"externally-managed-environment"* error —
@@ -278,7 +277,7 @@ licenses and don't constrain this repository. CircleClash itself is released und
 ## For maintainers — building the apps
 
 A ready-to-use GitHub Actions workflow is included at `.github/workflows/build.yml`. It builds a
-**one-folder** [PyInstaller](https://pyinstaller.org/) app for **Windows** and **Linux**, zips it, and
+**one-folder** [PyInstaller](https://pyinstaller.org/) app for **Windows**, zips it, and
 attaches them to the GitHub Release. To cut a release:
 
 ```bash
@@ -286,7 +285,7 @@ git tag v1.1.0
 git push origin v1.1.0
 ```
 
-The workflow then produces `CircleClash-windows.zip` and `CircleClash-linux.zip` and
+The workflow then produces `CircleClash-windows.zip` and
 uploads them to the release for that tag. You can also trigger a test build manually from the
 **Actions** tab.
 

@@ -3,6 +3,10 @@
 ## v1.1.2
 
 ### Fixed
+- **First render on a fresh install works now:** danser's very first run builds its settings file
+  against the default osu! Songs path and fails db init ("Beatmap not found") before our render-songs
+  path takes effect — but it saves the corrected settings on the way out. The pipeline now detects
+  that one-time miss and retries danser once automatically, so the first render no longer fails.
 - **No more CMD pop-up on Windows, and rendering works there:** danser and ffmpeg are now run with
   their output captured through a pipe and streamed into the in-app log (like on Linux). This both
   removes the console pop-up *and* gives them a valid output channel — without it, a windowed build

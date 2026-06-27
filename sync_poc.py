@@ -49,9 +49,10 @@ from osr_parser import Mods, ReplayInfo, parse_replay
 _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
-def _run_capture(cmd: list[str]) -> int:
-    """Run a console child (danser/ffmpeg) with NO console window on Windows, capturing
-    its combined output through a pipe and streaming it to our stdout in real time.
+def _run_capture(cmd: list[str]) -> tuple[int, str]:
+    """Run a console child (danser) with NO console window on Windows, capturing its
+    combined output through a pipe, streaming it to our stdout in real time, and also
+    returning it so callers can inspect what happened.
 
     Capturing via an explicit pipe is important on Windows: a --windowed frozen build
     has no valid inherited stdout, so a child launched with CREATE_NO_WINDOW and no
@@ -62,10 +63,12 @@ def _run_capture(cmd: list[str]) -> int:
         creationflags=_NO_WINDOW, bufsize=1, text=True,
         encoding="utf-8", errors="replace",
     )
+    chunks: list[str] = []
     if proc.stdout is not None:
         for line in proc.stdout:
             print(line, end="", flush=True)
-    return proc.wait()
+            chunks.append(line)
+    return proc.wait(), "".join(chunks)
 
 
 # --------------------------------------------------------------------------- #
@@ -163,7 +166,23 @@ def render_replay(
 
     print(f"  → rendering {replay_path.name}  (out: {out_name})")
     print(f"    {' '.join(cmd)}")
-    code = _run_capture(cmd)
+    code, out = _run_capture(cmd)
+
+    # danser's very first run writes its settings file from scratch, initialising its
+    # song database against the *default* osu! Songs path before our -sPatch OsuSongsDir
+    # (the render-songs folder) is in effect. That folder usually doesn't exist, so the
+    # first render fails with "Failed to initialize database / Beatmap not found" — but
+    # danser saves the corrected settings on the way out, so an immediate retry sees the
+    # right path and succeeds. Detect that one-time miss and retry once.
+    cold_miss = any(s in out for s in (
+        "Failed to initialize database",
+        "Beatmap not found",
+        "does not exist",
+    ))
+    if cold_miss:
+        print("  danser was initialising its settings for the first time; retrying once …")
+        code, out = _run_capture(cmd)
+
     if code != 0:
         raise SystemExit(
             f"danser exited with code {code} for {replay_path.name}. "
