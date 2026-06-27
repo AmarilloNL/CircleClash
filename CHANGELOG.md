@@ -3,11 +3,14 @@
 ## v1.1.2
 
 ### Fixed
-- **No more CMD pop-up on Windows:** danser and ffmpeg no longer spawn their own console
-  windows during a render — their output flows into the in-app log, the same as on Linux.
+- **No more CMD pop-up on Windows, and rendering works there:** danser and ffmpeg are now run with
+  their output captured through a pipe and streamed into the in-app log (like on Linux). This both
+  removes the console pop-up *and* gives them a valid output channel — without it, a windowed build
+  could leave danser with a broken stdout so it silently produced no video.
 - **danser output folder is auto-derived** from the danser binary, fixing
   *"Couldn't find danser's output for 'ov_left'"* when a stale path was stored.
-- **danser binary path auto-fills** in Settings after first-run setup, instead of looking empty.
+- **danser binary path auto-fills** in Settings (resolved from the managed/portable copy and written
+  back), and the render pipeline falls back to that copy if the field is ever empty.
 
 ### Added
 - **App icon** (taskbar + window).

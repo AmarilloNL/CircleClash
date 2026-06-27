@@ -1327,13 +1327,22 @@ class MainWindow(QMainWindow):
         save_config(self.cfg)
 
         out = self._out_path()
+        # Make sure we have a concrete danser path: prefer the configured one, else the
+        # managed/portable copy. Write it back so Settings shows it from now on.
+        danser_bin = self.cfg.get("danser_bin", "")
+        if (not danser_bin or not Path(danser_bin).exists()) and danser_setup:
+            loc = danser_setup.find_local_danser()
+            if loc:
+                danser_bin = str(loc)
+                self.cfg["danser_bin"] = danser_bin
+                save_config(self.cfg)
         # danser reads a small managed folder (instant import); the user's library
         # is just a source for maps they already own.
         render_songs = str(danser_setup.render_songs_dir()) if danser_setup else self.cfg.get("songs_dir", "")
         pargs = [
             self.leftZone.path, self.rightZone.path,
             "--title", self.titleEdit.text() or "friendly · bo1",
-            "--danser-bin", self.cfg["danser_bin"],
+            "--danser-bin", danser_bin,
             "--out", str(out),
             "--tail-seconds", str(self.cfg["tail_seconds"]),
             "--endcard-seconds", str(self.cfg["endcard_seconds"]),

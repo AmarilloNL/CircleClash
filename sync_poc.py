@@ -49,6 +49,25 @@ from osr_parser import Mods, ReplayInfo, parse_replay
 _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
+def _run_capture(cmd: list[str]) -> int:
+    """Run a console child (danser/ffmpeg) with NO console window on Windows, capturing
+    its combined output through a pipe and streaming it to our stdout in real time.
+
+    Capturing via an explicit pipe is important on Windows: a --windowed frozen build
+    has no valid inherited stdout, so a child launched with CREATE_NO_WINDOW and no
+    redirection gets a broken stdout handle and can silently fail to render. Giving it
+    our own pipe guarantees a valid handle *and* surfaces its progress in the GUI log."""
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        creationflags=_NO_WINDOW, bufsize=1, text=True,
+        encoding="utf-8", errors="replace",
+    )
+    if proc.stdout is not None:
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+    return proc.wait()
+
+
 # --------------------------------------------------------------------------- #
 # Mod / speed helpers
 # --------------------------------------------------------------------------- #
@@ -144,10 +163,10 @@ def render_replay(
 
     print(f"  → rendering {replay_path.name}  (out: {out_name})")
     print(f"    {' '.join(cmd)}")
-    result = subprocess.run(cmd, creationflags=_NO_WINDOW)
-    if result.returncode != 0:
+    code = _run_capture(cmd)
+    if code != 0:
         raise SystemExit(
-            f"danser exited with code {result.returncode} for {replay_path.name}. "
+            f"danser exited with code {code} for {replay_path.name}. "
             "If it's a 'map not found' error, the .osu for this beatmap MD5 isn't "
             "in danser's song folder yet (that's Milestone 2: auto-download)."
         )

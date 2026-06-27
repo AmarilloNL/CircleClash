@@ -53,6 +53,23 @@ for _stream in (sys.stdout, sys.stderr):
 # are inherited from us, so the output still flows into the GUI's render log.
 _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
+
+def _run_capture(cmd) -> int:
+    """Run a console child (ffmpeg) with NO console window on Windows, capturing its
+    combined output through a pipe and streaming it to our stdout in real time. The
+    explicit pipe matters on Windows: a --windowed frozen build has no valid inherited
+    stdout, so a child launched with CREATE_NO_WINDOW and no redirection can get a broken
+    stdout handle and fail. Our own pipe guarantees a valid handle and shows the output."""
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        creationflags=_NO_WINDOW, bufsize=1, text=True,
+        encoding="utf-8", errors="replace",
+    )
+    if proc.stdout is not None:
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+    return proc.wait()
+
 # When running inside a frozen build (the .exe relaunched in --run-pipeline mode),
 # Chromium is bundled inside the packaged Playwright. PLAYWRIGHT_BROWSERS_PATH=0
 # tells Playwright to load the browser from the package itself rather than a
@@ -539,7 +556,7 @@ def composite(overlay_png: Path, left_mp4: Path, right_mp4: Path, out: Path,
     cmd += _venc(encoder, quality) + ["-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2", str(out)]
     print(f"\n  -> compositing gameplay: {out}"
           + (f"  (trimmed to {trim_to:.1f}s)" if trim_to else ""))
-    if subprocess.run(cmd, creationflags=_NO_WINDOW).returncode != 0:
+    if _run_capture(cmd) != 0:
         raise SystemExit("ffmpeg composite failed.")
 
 
@@ -699,7 +716,7 @@ def render_endcard_video(match: MatchData, cache: Path, out_mp4: Path,
         "-c:a", "aac", "-b:a", "256k", "-t", f"{total}",
         str(out_mp4),
     ]
-    if subprocess.run(cmd, creationflags=_NO_WINDOW).returncode != 0:
+    if _run_capture(cmd) != 0:
         raise SystemExit("ffmpeg end-card assembly failed.")
 
     # the end card mp4 now holds everything; drop the hundreds of PNG frames so a
@@ -715,7 +732,7 @@ def concat_videos(gameplay: Path, endcard: Path, out: Path,
     listfile.write_text(f"file '{gameplay.resolve()}'\nfile '{endcard.resolve()}'\n")
     copy_cmd = [FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(listfile), "-c", "copy", str(out)]
     print(f"\n  -> joining gameplay + end card: {out}")
-    if subprocess.run(copy_cmd, creationflags=_NO_WINDOW).returncode == 0:
+    if _run_capture(copy_cmd) == 0:
         listfile.unlink(missing_ok=True)
         return
     # fallback: re-encode concat (robust against any param mismatch), same encoder
@@ -725,7 +742,7 @@ def concat_videos(gameplay: Path, endcard: Path, out: Path,
              "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
              *_venc(encoder, quality),
              "-c:a", "aac", "-b:a", "256k", "-ar", "48000", str(out)]
-    if subprocess.run(reenc, creationflags=_NO_WINDOW).returncode != 0:
+    if _run_capture(reenc) != 0:
         raise SystemExit("ffmpeg concat failed.")
     listfile.unlink(missing_ok=True)
 
@@ -857,7 +874,21 @@ def main() -> None:
         print("\nchrome-only: open the PNG to review the design.")
         return
 
-    danser = sync_poc.find_danser(args.danser_bin)
+    try:
+        danser = sync_poc.find_danser(args.danser_bin)
+    except SystemExit:
+        danser = None
+    if not danser:
+        # fall back to the managed/portable danser the app installed
+        try:
+            import danser_setup
+            loc = danser_setup.find_local_danser()
+            danser = str(loc) if loc else None
+        except Exception:
+            danser = None
+    if not danser:
+        raise SystemExit("Could not locate danser. Set the danser binary in Settings → Paths, "
+                         "or let CircleClash download it on first run.")
     # danser writes its recordings to a "videos" folder next to its binary. Derive
     # that from the resolved binary so it always matches (the explicit flag is only an
     # override for unusual setups); a stale/guessed path is what used to cause the
