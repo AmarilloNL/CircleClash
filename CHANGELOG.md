@@ -1,8 +1,12 @@
 # Changelog
 
-## v1.1.2
+## v1.1.5
 
 ### Fixed
+- **Composite step no longer fails with "file not found":** the app now always passes a real ffmpeg
+  path to the render pipeline (resolved fresh from the managed copy), and the pipeline falls back to
+  the ffmpeg danser bundles next to itself if needed — so the final video assembles even when there's
+  no system ffmpeg on PATH (typical on Windows) or the stored path went stale after moving the folder.
 - **First render on a fresh install works now:** danser's very first run builds its settings file
   against the default osu! Songs path and fails db init ("Beatmap not found") before our render-songs
   path takes effect — but it saves the corrected settings on the way out. The pipeline now detects

@@ -603,10 +603,11 @@ class SettingsDialog(QDialog):
         # Paths
         pl = self._tab(tabs, "Paths")
         pf = self._form()
-        # Show the actual installed binaries even if config somehow lost the path:
-        # resolve the managed/portable danser + ffmpeg live when the dialog opens.
+        # Show the copy that lives in THIS folder's data dir (the one a render will use),
+        # falling back to the stored path. Keeps Settings honest no matter where the app
+        # is placed or what the shared config happens to hold.
         danser_val = cfg.get("danser_bin", "")
-        if (not danser_val or not Path(danser_val).exists()) and danser_setup:
+        if danser_setup:
             try:
                 loc = danser_setup.find_local_danser()
                 if loc:
@@ -614,7 +615,7 @@ class SettingsDialog(QDialog):
             except Exception:
                 pass
         ffmpeg_val = cfg.get("ffmpeg_bin", "")
-        if (not ffmpeg_val or not Path(ffmpeg_val).exists()) and ffmpeg_setup:
+        if ffmpeg_setup:
             try:
                 got = ffmpeg_setup.find_local_ffmpeg()
                 if got:
@@ -1368,15 +1369,32 @@ class MainWindow(QMainWindow):
         save_config(self.cfg)
 
         out = self._out_path()
-        # Make sure we have a concrete danser path: prefer the configured one, else the
-        # managed/portable copy. Write it back so Settings shows it from now on.
-        danser_bin = self.cfg.get("danser_bin", "")
-        if (not danser_bin or not Path(danser_bin).exists()) and danser_setup:
-            loc = danser_setup.find_local_danser()
-            if loc:
-                danser_bin = str(loc)
-                self.cfg["danser_bin"] = danser_bin
+        # Resolve danser + ffmpeg preferring the copy in THIS folder's data dir, so the
+        # app is fully self-contained wherever it's placed. config.json is shared per-user,
+        # so a stored absolute path can point at a different/old copy; the local managed
+        # copy (next to the running exe) is the source of truth, with the stored path only
+        # as a fallback for a manually-chosen custom binary.
+        def _resolve_tool(cfg_key, find_local):
+            local = None
+            if find_local:
+                try:
+                    got = find_local()
+                    local = str(got[0]) if isinstance(got, tuple) else (str(got) if got else None)
+                except Exception:
+                    local = None
+            stored = self.cfg.get(cfg_key, "")
+            chosen = local or (stored if stored and Path(stored).exists() else "")
+            if chosen and chosen != stored:
+                self.cfg[cfg_key] = chosen
                 save_config(self.cfg)
+            return chosen
+
+        danser_bin = _resolve_tool("danser_bin",
+                                   danser_setup.find_local_danser if danser_setup else None)
+        ffmpeg_bin = _resolve_tool("ffmpeg_bin",
+                                   ffmpeg_setup.find_local_ffmpeg if ffmpeg_setup else None)
+        if not ffmpeg_bin:
+            ffmpeg_bin = shutil.which("ffmpeg") or ""
         # danser reads a small managed folder (instant import); the user's library
         # is just a source for maps they already own.
         render_songs = str(danser_setup.render_songs_dir()) if danser_setup else self.cfg.get("songs_dir", "")
@@ -1398,6 +1416,8 @@ class MainWindow(QMainWindow):
         ]
         if render_songs:
             pargs += ["--songs-dir", render_songs]
+        if ffmpeg_bin:
+            pargs += ["--ffmpeg", ffmpeg_bin]
         if self.cfg.get("songs_dir"):
             pargs += ["--library-dir", self.cfg["songs_dir"]]
         if self.cfg.get("skins_dir"):
@@ -1414,9 +1434,6 @@ class MainWindow(QMainWindow):
             pargs += ["--keep-fails"]
         if not self.cfg.get("force_skin_hits", True):
             pargs += ["--beatmap-hitsounds"]
-        ff = self.cfg.get("ffmpeg_bin", "")
-        if ff and (Path(ff).exists() or shutil.which(ff)):
-            pargs += ["--ffmpeg", ff]
 
         # --- visual tweaks ---
         c = self.cfg

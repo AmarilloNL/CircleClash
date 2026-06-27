@@ -70,6 +70,32 @@ def _run_capture(cmd) -> int:
             print(line, end="", flush=True)
     return proc.wait()
 
+
+def _resolve_ffmpeg_bin(current: str, danser_bin: str) -> str:
+    """Make sure we have a runnable ffmpeg. Prefer the path we were given; otherwise fall
+    back to the ffmpeg danser bundles right next to itself (always present), then to a
+    managed copy, then to whatever 'ffmpeg' resolves to. Prevents the composite step from
+    dying with "file not found" when there's no system ffmpeg on PATH (typical on Windows)."""
+    import shutil as _sh
+    if current and (Path(current).exists() or _sh.which(current)):
+        return current
+    exe = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+    try:
+        dparent = Path(danser_bin).resolve().parent
+        for cand in (dparent / "ffmpeg" / exe, dparent / exe):
+            if cand.exists():
+                return str(cand)
+    except Exception:
+        pass
+    try:
+        import ffmpeg_setup
+        got = ffmpeg_setup.find_local_ffmpeg()
+        if got:
+            return str(got[0])
+    except Exception:
+        pass
+    return current or "ffmpeg"
+
 # When running inside a frozen build (the .exe relaunched in --run-pipeline mode),
 # Chromium is bundled inside the packaged Playwright. PLAYWRIGHT_BROWSERS_PATH=0
 # tells Playwright to load the browser from the package itself rather than a
@@ -889,6 +915,8 @@ def main() -> None:
     if not danser:
         raise SystemExit("Could not locate danser. Set the danser binary in Settings → Paths, "
                          "or let CircleClash download it on first run.")
+    # Ensure ffmpeg is runnable; fall back to danser's bundled copy if needed.
+    FFMPEG = _resolve_ffmpeg_bin(FFMPEG, danser)
     # danser writes its recordings to a "videos" folder next to its binary. Derive
     # that from the resolved binary so it always matches (the explicit flag is only an
     # override for unusual setups); a stale/guessed path is what used to cause the
