@@ -31,6 +31,34 @@ from osu_api import OsuAPI, OsuUser, OsuBeatmap
 # left/right accent colors (matches the Neon×Triangles design)
 ACCENT = {"left": "#ff66ab", "right": "#66d9ff"}
 
+# Per-player accents for free-for-all, in panel order. The first two match the
+# classic 1v1 pink/ice; 3rd/4th extend the neon palette (green, gold).
+PALETTE = ["#ff66ab", "#66d9ff", "#8be01f", "#ffd24a"]
+
+# Team accents: two hue families, a brighter + softer variant per teammate so
+# same-team panels are grouped by colour yet still tell apart.
+TEAM_ACCENTS = [
+    ["#ff66ab", "#ff9ccb"],   # team A — pink family
+    ["#66d9ff", "#99e6ff"],   # team B — ice family
+]
+
+# panel index -> the `side` label kept on PlayerData for back-compat / logging
+SIDE_NAMES = ["left", "right", "p3", "p4"]
+
+
+def assign_accents(n: int, mode: str = "ffa", teams: list[int] | None = None) -> list[str]:
+    """Accent hex per player. FFA cycles PALETTE; team mode groups by team hue."""
+    if mode == "team" and teams:
+        seen: dict[int, int] = {}
+        out = []
+        for t in teams:
+            variant = seen.get(t, 0)
+            seen[t] = variant + 1
+            fam = TEAM_ACCENTS[t % len(TEAM_ACCENTS)]
+            out.append(fam[variant % len(fam)])
+        return out
+    return [PALETTE[i % len(PALETTE)] for i in range(n)]
+
 
 # --------------------------------------------------------------------------- #
 # Grade (osu!standard ranking rules — the .osr stores counts, not the letter)
@@ -62,7 +90,7 @@ def compute_grade(n300: int, n100: int, n50: int, nmiss: int, mods: Mods) -> tup
 # --------------------------------------------------------------------------- #
 @dataclass
 class PlayerData:
-    side: str                 # "left" | "right"
+    side: str                 # "left" | "right" | "p3" | "p4" (panel order label)
     accent: str               # hex accent for this side
 
     # from the replay
@@ -78,6 +106,9 @@ class PlayerData:
     nmiss: int
     grade: str                # "SS"|"S"|"A"|"B"|"C"|"D"
     silver: bool
+
+    # grouping (team mode only)
+    team: int | None = None   # team index in team mode; None in free-for-all
 
     # from the API (may be unresolved)
     resolved: bool = False
@@ -119,21 +150,63 @@ class MapData:
 
 @dataclass
 class MatchData:
-    left: PlayerData
-    right: PlayerData
+    players: list[PlayerData]          # 2..4, index = panel order
     map: MapData
     match_title: str = "friendly · bo1"
+    mode: str = "ffa"                  # "ffa" | "team"
+    teams: list[int] | None = None     # team index per player; None in ffa
+
+    # --- compatibility shims: existing 1v1 code reads .left / .right ---
+    @property
+    def left(self) -> PlayerData:
+        return self.players[0]
+
+    @property
+    def right(self) -> PlayerData:
+        return self.players[1]
+
+    @classmethod
+    def from_pair(cls, left: PlayerData, right: PlayerData, map: MapData,
+                  match_title: str = "friendly · bo1") -> "MatchData":
+        return cls(players=[left, right], map=map, match_title=match_title)
+
+    # --- ranking / winners (generalised from the old winner_side) ---
+    def ranking(self) -> list[int]:
+        """Player indices, best score first."""
+        return sorted(range(len(self.players)),
+                      key=lambda i: self.players[i].score, reverse=True)
+
+    def team_ids(self) -> list[int]:
+        """Distinct team ids present, in first-appearance order."""
+        seen: list[int] = []
+        for t in (self.teams or []):
+            if t not in seen:
+                seen.append(t)
+        return seen
+
+    def team_score(self, t: int) -> int:
+        if not self.teams:
+            return 0
+        return sum(p.score for i, p in enumerate(self.players) if self.teams[i] == t)
+
+    def winner(self) -> int:
+        """FFA: index of the top-scoring player. Team: winning team id."""
+        if self.mode == "team" and self.teams:
+            return max(self.team_ids(), key=self.team_score)
+        return self.ranking()[0]
 
     @property
     def winner_side(self) -> str:
-        return "left" if self.left.score >= self.right.score else "right"
+        """Back-compat: which of the first two panels won (1v1 semantics)."""
+        return "left" if self.players[0].score >= self.players[1].score else "right"
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["winner_side"] = self.winner_side
+        d["winner"] = self.winner()
         d["map"]["star_rating"] = self.map.star_rating
-        d["left"]["display_name"] = self.left.display_name
-        d["right"]["display_name"] = self.right.display_name
+        for i, p in enumerate(self.players):
+            d["players"][i]["display_name"] = p.display_name
         return d
 
 
@@ -142,16 +215,19 @@ class MatchData:
 # --------------------------------------------------------------------------- #
 def _build_player(
     side: str,
+    accent: str,
     info: ReplayInfo,
     api: OsuAPI | None,
     cache: Path,
     id_override: int | None,
+    team: int | None = None,
 ) -> PlayerData:
     grade, silver = compute_grade(info.count_300, info.count_100, info.count_50, info.count_miss, info.mods)
 
     p = PlayerData(
         side=side,
-        accent=ACCENT[side],
+        accent=accent,
+        team=team,
         play_username=info.player,
         mods=info.mods_str,
         accuracy=round(info.accuracy_pct, 2),
@@ -195,15 +271,41 @@ def _build_player(
 # Public entry point
 # --------------------------------------------------------------------------- #
 def assemble_match(
-    left_osr: str,
-    right_osr: str,
+    paths,
+    right_osr: str | None = None,
     *,
     api: OsuAPI | None = None,
     cache_dir: str = "cache",
     left_id: int | None = None,
     right_id: int | None = None,
+    id_overrides: list[int | None] | None = None,
     match_title: str = "friendly · bo1",
+    mode: str = "ffa",
+    teams: list[int] | None = None,
 ) -> MatchData:
+    """Assemble a MatchData from 2–4 replays of the same beatmap.
+
+    Two call styles are supported:
+      * legacy 1v1:  assemble_match(left_osr, right_osr, left_id=…, right_id=…)
+      * N-player:    assemble_match([p1, p2, p3], id_overrides=[…], mode=…, teams=…)
+    """
+    # Normalise the legacy (left_osr, right_osr) positional form into a list.
+    if isinstance(paths, (str, Path)):
+        osr_paths = [paths, right_osr]
+        if id_overrides is None:
+            id_overrides = [left_id, right_id]
+    else:
+        osr_paths = list(paths)
+
+    if not (2 <= len(osr_paths) <= 4):
+        raise ValueError(f"CircleClash supports 2–4 players, got {len(osr_paths)}.")
+    if id_overrides is None:
+        id_overrides = [None] * len(osr_paths)
+    if len(id_overrides) != len(osr_paths):
+        raise ValueError("id_overrides length must match the number of replays.")
+    if mode == "team" and (not teams or len(teams) != len(osr_paths)):
+        raise ValueError("team mode requires a `teams` entry per player.")
+
     if api is None:
         try:
             api = OsuAPI()
@@ -214,17 +316,19 @@ def assemble_match(
     cache = Path(cache_dir)
     cache.mkdir(parents=True, exist_ok=True)
 
-    left_info = parse_replay(left_osr)
-    right_info = parse_replay(right_osr)
+    infos = [parse_replay(p) for p in osr_paths]
+    md5 = infos[0].beatmap_md5
+    if any(info.beatmap_md5 != md5 for info in infos):
+        raise ValueError("The replays are on different beatmaps.")
 
-    if left_info.beatmap_md5 != right_info.beatmap_md5:
-        raise ValueError("The two replays are on different beatmaps.")
+    accents = assign_accents(len(osr_paths), mode, teams)
+    players = [
+        _build_player(SIDE_NAMES[i], accents[i], info, api, cache, id_overrides[i],
+                      team=(teams[i] if teams else None))
+        for i, info in enumerate(infos)
+    ]
 
-    left = _build_player("left", left_info, api, cache, left_id)
-    right = _build_player("right", right_info, api, cache, right_id)
-
-    # map
-    md5 = left_info.beatmap_md5
+    # map (resolved once — all replays share it)
     bm: OsuBeatmap | None = api.lookup_beatmap_by_md5(md5) if api is not None else None
     mp = MapData(md5=md5)
     if bm:
@@ -241,7 +345,8 @@ def assemble_match(
         got = OsuAPI.download(bm.cover_url, cover_dest)
         mp.cover_path = str(got) if got else None
 
-    return MatchData(left=left, right=right, map=mp, match_title=match_title)
+    return MatchData(players=players, map=mp, match_title=match_title,
+                     mode=mode, teams=(list(teams) if teams else None))
 
 
 # --------------------------------------------------------------------------- #

@@ -10,3 +10,6 @@
 
 PySide6>=6.6        # desktop GUI
 playwright>=1.40     # headless Chromium that renders the overlay + results card
+
+# Dev / testing only (not needed to run the app):
+pytest>=7.0          # unit tests in tests/ (run: python -m pytest)

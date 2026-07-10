@@ -38,6 +38,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 # Force UTF-8 stdio so the arrows/bullets/✓/× we print never crash on a Windows
@@ -103,7 +104,7 @@ def _resolve_ffmpeg_bin(current: str, danser_bin: str) -> str:
 if getattr(sys, "frozen", False):
     os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
 
-from match_assembler import MatchData, PlayerData, MapData, assemble_match
+from match_assembler import MatchData, PlayerData, MapData, assemble_match, TEAM_ACCENTS
 from osr_parser import parse_replay, mods_to_acronyms
 import sync_poc
 
@@ -136,6 +137,67 @@ class Layout:
 
 L = Layout
 
+
+# Height of the per-panel identity strip in the 3–4 player layouts. In 1v1 the
+# identity lives in the top bar instead, so 2-player panels reserve none (label_h=0)
+# and their gameplay area is byte-for-byte unchanged.
+PANEL_LABEL_H = 44
+
+
+@dataclass(frozen=True)
+class PanelRect:
+    """One gameplay panel in the 1080p design. `x/y/w/h` is the outer chrome panel
+    (the bordered box in the overlay). `label_h` is a strip reserved at the panel's
+    top for a per-panel identity label (0 in 1v1). The `dz_*` interior — inset by the
+    border and that label strip — is where danser renders. Consumers apply `_s()` for
+    non-1080p output, exactly as the old L.dz_* constants did."""
+    x: int
+    y: int
+    w: int
+    h: int
+    label_h: int = 0
+
+    @property
+    def dz_x(self) -> int: return self.x + Layout.BORDER
+    @property
+    def dz_y(self) -> int: return self.y + Layout.BORDER + self.label_h
+    @property
+    def dz_w(self) -> int: return self.w - 2 * Layout.BORDER
+    @property
+    def dz_h(self) -> int: return self.h - 2 * Layout.BORDER - self.label_h
+
+
+# player count -> (rows, cols). 2 = side by side, 3 = columns, 4 = 2x2 grid.
+_GRID = {2: (1, 2), 3: (1, 3), 4: (2, 2)}
+
+
+def panels_for(n: int, mode: str = "ffa") -> list[PanelRect]:
+    """Return `n` equal-sized PanelRects laid out in reading order (row-major).
+
+    For n=2 this reproduces the classic side-by-side coordinates exactly (label_h=0),
+    so 1v1 output is unchanged. For 3–4 players each panel reserves a top strip
+    (PANEL_LABEL_H) for its identity label. `mode` is accepted for future team-divider
+    styling; it does not affect geometry (team grouping emerges from player/panel
+    ordering — with a 2x2 grid, teams [0,1,0,1] fall into left/right columns)."""
+    if n not in _GRID:
+        raise ValueError(f"CircleClash supports 2–4 players, got {n}.")
+    rows, cols = _GRID[n]
+    label_h = 0 if n == 2 else PANEL_LABEL_H
+    ix = Layout.PAD_X
+    iy = Layout.TOP_H + Layout.PAD_Y
+    iw = Layout.W - 2 * Layout.PAD_X
+    ih = Layout.H - Layout.TOP_H - Layout.FOOTER_H - 2 * Layout.PAD_Y
+    cell_w = (iw - (cols - 1) * Layout.GAP) // cols
+    cell_h = (ih - (rows - 1) * Layout.GAP) // rows
+    out = []
+    for i in range(n):
+        r, c = divmod(i, cols)
+        x = ix + c * (cell_w + Layout.GAP)
+        y = iy + r * (cell_h + Layout.GAP)
+        out.append(PanelRect(x, y, cell_w, cell_h, label_h))
+    return out
+
+
 # Output resolution + framerate. SCALE multiplies the 1080p design: chrome/end
 # card render via Chromium's device_scale_factor, danser renders its panels at the
 # scaled size, and ffmpeg composites at scaled coords — so everything stays aligned.
@@ -143,6 +205,11 @@ SCALE = 1.0
 FPS = 60
 FFMPEG = "ffmpeg"   # overridable via --ffmpeg (the GUI passes a provisioned binary)
 RES_SCALES = {"720p": 720 / 1080, "1080p": 1.0, "1440p": 1440 / 1080, "4k": 2160 / 1080}
+
+# danser positions HUD elements (pp counter, hit counts, …) in a FIXED 1920x1080
+# reference stretched to whatever the panel's render size is — so HUD coordinates are
+# resolution- and panel-independent (never _s()-scaled). Bottom-right corner ≈ (1920,1080).
+HUD_W, HUD_H = 1920, 1080
 
 
 def _s(v: float) -> int:
@@ -203,6 +270,9 @@ def _flag_html(p: PlayerData, cache: Path) -> str:
 # Build chrome HTML
 # ----------------------------------------------------------------------------- #
 def build_chrome_html(match: MatchData, cache: Path) -> str:
+    # 3–4 players use the per-panel-label layout; 1v1 keeps its bespoke top-bar design.
+    if len(match.players) > 2:
+        return build_multi_chrome_html(match, cache)
     Lp, Rp, M = match.left, match.right, match.map
     repl = {
         "L_AVATAR": _avatar_html(Lp), "R_AVATAR": _avatar_html(Rp),
@@ -222,6 +292,142 @@ def build_chrome_html(match: MatchData, cache: Path) -> str:
     for k, v in repl.items():
         html = html.replace("%%" + k + "%%", str(v))
     return html
+
+
+def _esc(s: str) -> str:
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def build_multi_chrome_html(match: MatchData, cache: Path) -> str:
+    """Overlay chrome for 3–4 players: a slim centred map bar, one bordered gameplay
+    panel per player (laid out by panels_for), and a per-panel identity strip carrying
+    avatar + name + rank/pp + mods. Team mode tints panels by team and adds an A/B tag."""
+    M = match.map
+    n = len(match.players)
+    panels = panels_for(n, match.mode)
+    lh = panels[0].label_h
+    team_tags = ["A", "B", "C", "D"]
+
+    panel_html = []
+    for i, (p, rect) in enumerate(zip(match.players, panels)):
+        team_badge = ""
+        if match.mode == "team" and match.teams is not None:
+            team_badge = f'<span class="pteam">{team_tags[match.teams[i] % len(team_tags)]}</span>'
+        rank = _esc(p.rank_display) if p.rank_display and p.rank_display != "—" else ""
+        pp = f"{p.pp:,.0f}pp" if p.pp else ""
+        bits = [b for b in (_flag_html(p, cache), rank, pp) if b]
+        sub = '<span class="pdot">·</span>'.join(bits)
+        panel_html.append(f'''
+    <div class="mpanel" style="left:{rect.x}px;top:{rect.y}px;width:{rect.w}px;height:{rect.h}px;--c:{p.accent};">
+      <div class="plabel">
+        <div class="pav">{_avatar_html(p)}</div>
+        <div class="pwho"><div class="pnm">{team_badge}{_esc(p.display_name)}</div>
+          <div class="psub">{sub}</div></div>
+        <div class="pmods">{_esc(p.mods)}</div>
+      </div>
+    </div>''')
+
+    mode_label = "2v2" if match.mode == "team" else f"{n}-player"
+    accents_js = ",".join(f'"{p.accent}"' for p in match.players)
+    diff = f"[{M.version}]" if M.version else ""
+
+    return f'''<!DOCTYPE html><html><head><meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@400;500;700;800;900&family=JetBrains+Mono:wght@400;500;700&family=Orbitron:wght@500;700;900&display=swap" rel="stylesheet">
+<style>
+:root{{--ink:#0a0a0d;--pink:#ff66ab;--ice:#66d9ff;--line:#23232c;--muted:#7d7488;}}
+*{{box-sizing:border-box;margin:0;padding:0;}}
+html,body{{width:1920px;height:1080px;overflow:hidden;font-family:"Exo 2",sans-serif;}}
+#stage{{position:absolute;inset:0;color:#f3ecf7;
+  background:radial-gradient(110% 70% at 0% 45%,rgba(255,102,171,.13),transparent 52%),
+             radial-gradient(110% 70% at 100% 45%,rgba(102,217,255,.13),transparent 52%),var(--ink);}}
+#stage::before{{content:"";position:absolute;inset:0;z-index:1;pointer-events:none;
+  background:repeating-linear-gradient(0deg,transparent 0 3px,rgba(255,255,255,.013) 3px 4px);}}
+.grid{{position:absolute;inset:0;z-index:0;opacity:.45;
+  background:linear-gradient(90deg,rgba(255,255,255,.035) 1px,transparent 1px) 0 0/76px 100%;}}
+.trifield{{position:absolute;inset:0;z-index:0;overflow:hidden;}}
+.tri{{position:absolute;}}
+
+.mtop{{position:absolute;top:0;left:0;right:0;height:140px;z-index:6;
+  display:flex;align-items:center;justify-content:center;gap:22px;
+  border-bottom:2px solid var(--line);background:linear-gradient(180deg,#0c0c12,#0a0a10);}}
+.med{{position:relative;width:88px;height:88px;flex:none;display:grid;place-items:center;}}
+.med .r{{position:absolute;border-radius:50%;border:2px solid;}}
+.med .r1{{inset:0;border-color:rgba(255,255,255,.16);}}
+.med .r2{{inset:11px;border-color:rgba(255,102,171,.55);}}
+.med .r3{{inset:22px;border-color:rgba(102,217,255,.55);}}
+.med .core{{width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,var(--pink),var(--ice));
+  display:grid;place-items:center;color:#160f1d;font-family:"Orbitron";font-weight:900;font-size:15px;
+  box-shadow:0 0 26px -6px rgba(255,102,171,.8);line-height:1;}}
+.ttl{{text-align:left;max-width:640px;}}
+.ttl .eyebrow{{font-family:"JetBrains Mono",monospace;font-size:10px;letter-spacing:4px;text-transform:uppercase;color:var(--muted);}}
+.ttl .song{{font-weight:800;font-size:26px;line-height:1.05;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
+.ttl .row{{margin-top:5px;display:flex;align-items:center;gap:10px;}}
+.ttl .artist{{font-family:"JetBrains Mono",monospace;font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:360px;}}
+.ttl .diff{{font-size:12px;color:#ff9ccb;border:1px solid rgba(255,102,171,.32);border-radius:999px;padding:2px 10px;white-space:nowrap;}}
+
+.mpanel{{position:absolute;z-index:2;border:3px solid var(--c);overflow:hidden;
+  box-shadow:0 0 44px -16px var(--c);background:linear-gradient(180deg,#08070b,#060509);}}
+.plabel{{position:absolute;top:0;left:0;right:0;height:{lh}px;display:flex;align-items:center;gap:11px;
+  padding:0 14px;background:linear-gradient(180deg,rgba(22,17,28,.97),rgba(12,10,16,.92));
+  border-bottom:1px solid var(--c);}}
+.pav{{width:{lh - 16}px;height:{lh - 16}px;border-radius:50%;border:2px solid var(--c);overflow:hidden;flex:none;
+  background:radial-gradient(circle at 35% 30%,#2c2336,#100c16);display:grid;place-items:center;
+  font-weight:900;font-size:15px;color:var(--c);box-shadow:0 0 16px -6px var(--c);}}
+.pav img{{width:100%;height:100%;object-fit:cover;}}
+.pwho{{min-width:0;flex:1;}}
+.pnm{{font-weight:800;font-size:20px;line-height:1;letter-spacing:.3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  display:flex;align-items:center;gap:8px;}}
+.pteam{{font-family:"Orbitron";font-weight:900;font-size:13px;color:#160f1d;background:var(--c);
+  border-radius:5px;padding:1px 7px;line-height:1.3;}}
+.psub{{margin-top:5px;display:flex;align-items:center;gap:8px;font-family:"JetBrains Mono",monospace;
+  font-size:13px;color:var(--muted);white-space:nowrap;}}
+.pdot{{color:var(--muted);}}
+.flagimg{{width:26px;height:17px;border-radius:3px;object-fit:cover;box-shadow:0 0 0 1px rgba(255,255,255,.15);}}
+.flagtxt{{font-weight:700;color:#e9e2f0;}}
+.pmods{{margin-left:auto;font-family:"JetBrains Mono",monospace;font-size:13px;letter-spacing:1px;color:#e9e2f0;
+  border:1px solid var(--c);border-radius:6px;padding:4px 10px;box-shadow:0 0 14px -6px var(--c);flex:none;}}
+
+.mfooter{{position:absolute;bottom:0;left:0;right:0;height:104px;z-index:6;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;
+  border-top:2px solid var(--line);background:linear-gradient(180deg,#0b0b10,#090910);}}
+.mfooter .mt{{font-weight:800;font-size:26px;letter-spacing:1px;text-transform:uppercase;}}
+.mfooter .mm{{font-family:"JetBrains Mono",monospace;font-size:12px;letter-spacing:3px;color:var(--muted);text-transform:uppercase;}}
+</style></head>
+<body><div id="stage">
+  <div class="grid"></div>
+  <div class="trifield" id="tris"></div>
+
+  <div class="mtop">
+    <div class="med"><div class="r r1"></div><div class="r r2"></div><div class="r r3"></div><div class="core">{M.star_rating:.2f}</div></div>
+    <div class="ttl"><div class="eyebrow">{mode_label} · same map</div>
+      <div class="song">{_esc(M.title or "Unknown")}</div>
+      <div class="row"><span class="artist">{_esc(M.artist or "")}</span><span class="diff">{_esc(diff)}</span></div></div>
+  </div>
+{''.join(panel_html)}
+  <div class="mfooter">
+    <div class="mt">{_esc(match.match_title)}</div>
+    <div class="mm">{mode_label} · {_esc(diff)} · ★{M.star_rating:.2f}</div>
+  </div>
+</div>
+<script>
+  const ac=[{accents_js}];
+  const tf=document.getElementById('tris');
+  for(let i=0;i<26;i++){{
+    const size=20+Math.random()*46;
+    const t=document.createElementNS('http://www.w3.org/2000/svg','svg');
+    t.setAttribute('viewBox','0 0 100 100');t.setAttribute('width',size);t.setAttribute('height',size);
+    t.classList.add('tri');
+    t.innerHTML='<polygon points="50,5 95,95 5,95" fill="'+ac[Math.floor(Math.random()*ac.length)]+'"/>';
+    t.style.left=(Math.random()*100)+'%';
+    t.style.bottom=(Math.random()*1080-40)+'px';
+    t.style.transform='rotate('+(Math.random()*40-20)+'deg)';
+    t.style.opacity=(.09+Math.random()*.12).toFixed(3);
+    tf.appendChild(t);
+  }}
+</script>
+</body></html>'''
 
 
 # ----------------------------------------------------------------------------- #
@@ -260,7 +466,8 @@ def _hsv(hex_color: str) -> dict:
 def _render_patch(accent_hex: str, skin: str | None = None, songs_dir: str | None = None,
                   skins_dir: str | None = None, music_vol: float | None = None,
                   hit_vol: float | None = None, master_vol: float | None = None,
-                  force_skin_hits: bool = True, vis: dict | None = None) -> str:
+                  force_skin_hits: bool = True, vis: dict | None = None,
+                  panel: "PanelRect | None" = None) -> str:
     """Resolution + a per-side Gameplay restyle, applied via -sPatch so it never
     touches the user's saved danser config. Also points danser at the right Songs
     folder, sets per-side skin, output resolution/FPS, and audio volumes.
@@ -272,8 +479,23 @@ def _render_patch(accent_hex: str, skin: str | None = None, songs_dir: str | Non
     """
     tint = _hsv(accent_hex)
     hud = round(0.7 * SCALE, 3)
+    # danser records at this panel's interior size. Defaulting to the 2p layout keeps
+    # 1v1 output byte-identical; multi-player passes the per-cell PanelRect.
+    dz_w = panel.dz_w if panel else L.dz_w
+    dz_h = panel.dz_h if panel else L.dz_h
+    # pp / hit-count position is user-adjustable (Settings sliders -> --pp-x/--pp-y,
+    # 0..1). danser's HUD coordinate space is bigger than the recording frame
+    # (empirically ~1.72x wide / ~1.49x tall), so we map the 0..1 position across that
+    # space and _s()-scale it so it lands the same fraction at every resolution (fixed,
+    # unscaled numbers overflowed the space at 720p and fell off-screen). Align=BottomRight
+    # anchors the value's right/bottom edge so it grows inward and long numbers can't clip.
+    _v0 = vis or {}
+    pp_x = float(_v0.get("pp_x", 0.86))
+    pp_y = float(_v0.get("pp_y", 0.88))
+    ppx = _s(round(pp_x * 1.72 * dz_w))
+    ppy = _s(round(pp_y * 1.49 * dz_h))
     patch = {
-        "Recording": {"FrameWidth": _s(L.dz_w), "FrameHeight": _s(L.dz_h), "FPS": FPS,
+        "Recording": {"FrameWidth": _s(dz_w), "FrameHeight": _s(dz_h), "FPS": FPS,
                       "AudioCodec": "aac", "AudioBitrate": "320k"},
         "Gameplay": {
             # --- hide the clutter ---
@@ -284,17 +506,14 @@ def _render_patch(accent_hex: str, skin: str | None = None, songs_dir: str | Non
             "Boundaries": {"Enabled": False},
             "ShowResultsScreen": False,
             "ShowWarningArrows": False,
-            # --- keep + tidy, tinted. Anchored to the panel's bottom-RIGHT with a
-            #     fixed margin (BottomRight/Right align) so the value grows leftward
-            #     and a long pp number (e.g. 1141.37) can never slide under the right
-            #     border. Positions are in render-frame pixels, so they scale with res. ---
+            # --- keep + tidy, tinted. Position from the user's pp-x/pp-y (see above). ---
             "PPCounter": {
-                "Show": True, "XPosition": _s(L.dz_w - 48), "YPosition": _s(L.dz_h - 86),
+                "Show": True, "XPosition": ppx, "YPosition": ppy,
                 "Align": "BottomRight", "Color": tint, "Decimals": 2, "Scale": hud,
             },
             "HitCounter": {
-                "Show": True, "XPosition": _s(L.dz_w - 48), "YPosition": _s(L.dz_h - 50),
-                "Spacing": _s(34), "FontScale": hud, "Align": "Right", "ValueAlign": "Right",
+                "Show": True, "XPosition": ppx, "YPosition": ppy - _s(44),
+                "Spacing": _s(34), "FontScale": hud, "Align": "BottomRight", "ValueAlign": "Right",
                 "Color300": tint, "Color100": tint, "Color50": tint, "ColorMiss": tint,
                 "Show300": True,
             },
@@ -402,6 +621,61 @@ def _render_patch(accent_hex: str, skin: str | None = None, songs_dir: str | Non
 # ----------------------------------------------------------------------------- #
 # Composite (no crop: danser already rendered at panel size)
 # ----------------------------------------------------------------------------- #
+def validate_sync(osr_paths: list[str]) -> None:
+    """Guard the one thing that makes a synced comparison impossible: mismatched
+    speed. danser renders each panel with -quickstart (zeroed lead-in) so they start
+    frame-locked, but if the replays run at different speeds (HT vs NoMod vs DT/NC)
+    their timelines diverge immediately and can never line up. Fail early and clearly."""
+    speeds = []
+    for p in osr_paths:
+        info = parse_replay(p)
+        speeds.append((info.player, info.mods_str, sync_poc.speed_multiplier(info.mods)))
+    if len({s for _, _, s in speeds}) > 1:
+        detail = ", ".join(f"{n or '?'} {m}@{sp:g}x" for n, m, sp in speeds)
+        raise SystemExit(
+            "Cannot sync: the replays run at different speeds, so their panels would "
+            f"drift apart ({detail}). Use replays with matching speed mods — all NoMod/"
+            "HR/HD, or all DoubleTime, etc. (HT/DT/NC change the map's length).")
+
+
+def report_sync(clips: list[Path]) -> None:
+    """Post-render sanity check: warn (don't fail) if the rendered panels differ in
+    length by more than ~a frame, which would hint at a timing problem. Skipped
+    silently if ffprobe isn't available."""
+    probe = _ffprobe_bin()
+    if not probe:
+        return
+    durs = []
+    for c in clips:
+        out = subprocess.run([probe, "-v", "error", "-show_entries", "format=duration",
+                              "-of", "default=noprint_wrappers=1:nokey=1", str(c)],
+                             capture_output=True, text=True)
+        try:
+            durs.append(float(out.stdout.strip()))
+        except ValueError:
+            return
+    spread = max(durs) - min(durs)
+    frame = 1.0 / max(1, FPS)
+    if spread > frame * 1.5:
+        print(f"  ⚠ panel durations vary by {spread * 1000:.0f} ms "
+              f"(>{frame * 1000:.0f} ms/frame) — panels are trimmed to a common end so "
+              f"the start stays locked, but check for a stray speed/HP-mod difference.")
+    else:
+        print(f"  sync: panels within {spread * 1000:.0f} ms — locked.")
+
+
+def _ffprobe_bin() -> str | None:
+    """Find ffprobe next to the resolved ffmpeg, else on PATH."""
+    try:
+        base = Path(FFMPEG)
+        cand = base.with_name(base.name.replace("ffmpeg", "ffprobe"))
+        if cand.exists():
+            return str(cand)
+    except Exception:
+        pass
+    return shutil.which("ffprobe")
+
+
 def replay_end_seconds(path: str) -> float:
     """Absolute time of the last replay frame (~when the play ended), from the
     .osr cursor stream. danser renders the whole song past this, so we use it to
@@ -512,59 +786,102 @@ def _venc(encoder: str = "x264", quality: str = "high") -> list[str]:
     return enc["args"] + [enc["rc"], str(qval)] + enc["extra"] + ["-pix_fmt", "yuv420p"]
 
 
-def _encoder_available(encoder: str) -> bool:
+def _encoder_check(encoder: str, ffmpeg_bin: str | None = None) -> tuple[bool, str]:
     """Quick pre-flight: can this ffmpeg actually open the chosen encoder here?
 
-    CPU encoders (libx264/libx265) are always assumed present. For GPU (NVENC)
-    encoders we briefly try to encode a single black frame and check the exit
-    code — this catches cases like the bundled bleeding-edge ffmpeg whose
-    av1_nvenc needs a newer NVIDIA driver than is installed (the encoder fails to
-    *open*, regardless of input, so a 1-frame probe surfaces it in <1s instead of
-    blowing up minutes into the real composite)."""
+    Returns (ok, reason). CPU encoders (libx264/libx265) are always fine. For GPU
+    (NVENC) encoders we try to encode a single black frame and, on failure, classify
+    the ffmpeg stderr so the log says *why* — the common causes are very different and
+    only one is an old driver:
+      * the ffmpeg build has NO NVENC compiled in ("Unknown encoder")
+      * NVENC runtime can't reach the GPU ("Cannot load libnvidia-encode",
+        "No NVENC capable devices", "Cannot init CUDA")
+      * the codec needs a newer driver than installed (e.g. av1_nvenc)."""
     spec = ENCODERS.get(encoder)
     if not spec:
-        return False
+        return False, "unknown encoder id"
     args = spec["args"]
     try:
         codec = args[args.index("-c:v") + 1]
     except (ValueError, IndexError):
-        return True
+        return True, ""
     if codec.startswith("lib"):          # libx264 / libx265 -> CPU, always fine
-        return True
-    probe = [FFMPEG, "-hide_banner", "-loglevel", "error",
+        return True, ""
+    ff = ffmpeg_bin or FFMPEG
+    probe = [ff, "-hide_banner", "-loglevel", "error",
              "-f", "lavfi", "-i", "color=c=black:s=320x240:r=10:d=0.2",
              "-pix_fmt", "yuv420p", "-frames:v", "1", "-c:v", codec, "-f", "null", "-"]
     try:
-        r = subprocess.run(probe, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=30,
+        r = subprocess.run(probe, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                           timeout=30, text=True, encoding="utf-8", errors="replace",
                            creationflags=_NO_WINDOW)
-        return r.returncode == 0
-    except Exception:
-        return False
+    except Exception as e:
+        return False, f"probe couldn't run ({e})"
+    if r.returncode == 0:
+        return True, ""
+    err = (r.stderr or "").strip()
+    low = err.lower()
+    if "unknown encoder" in low:
+        reason = (f"this ffmpeg build has no '{codec}' — it was compiled without NVENC. "
+                  "Point Settings → ffmpeg at a build that includes it (most system / Arch "
+                  "ffmpeg packages do), then reopen CircleClash.")
+    elif any(s in low for s in ("cannot load", "libnvidia-encode", "no nvenc",
+                                "no capable devices", "cannot init cuda", "not permitted",
+                                "cannot open the device")):
+        reason = ("NVENC couldn't reach the GPU — the driver's encode library isn't visible "
+                  "to ffmpeg. Check the NVIDIA driver is installed and libnvidia-encode.so is "
+                  "on the library path.")
+    elif any(s in low for s in ("driver does not support", "required nvenc api", "minimum required")):
+        reason = ("this ffmpeg wants a newer NVIDIA driver than you have for NVENC — often the "
+                  "bundled ffmpeg is bleeding-edge and outruns the driver. A system ffmpeg "
+                  "usually matches your driver; otherwise update the driver (AV1 needs RTX 40-series).")
+    else:
+        reason = err.splitlines()[-1] if err else "encoder failed to open (no detail)."
+    return False, reason
 
 
-def composite(overlay_png: Path, left_mp4: Path, right_mp4: Path, out: Path,
+def _overlay_chain(panels: list[PanelRect]) -> str:
+    """The video half of the composite filter_complex: scale each danser clip to its
+    panel's interior and overlay it onto the chrome (input 0) at the panel's position.
+    Clips are ffmpeg inputs 1..N. Ends WITHOUT an output label so the caller can append
+    [v] or [vov]. For N=2 this is equivalent to the old hand-written two-panel chain."""
+    n = len(panels)
+    parts = [f"[{i + 1}:v]scale={_s(p.dz_w)}:{_s(p.dz_h)}:flags=bicubic,setsar=1[g{i}];"
+             for i, p in enumerate(panels)]
+    cur = "[0:v]"
+    for i, p in enumerate(panels):
+        last = (i == n - 1)
+        lbl = "" if last else f"[o{i}]"
+        sep = "" if last else ";"
+        parts.append(f"{cur}[g{i}]overlay={_s(p.dz_x)}:{_s(p.dz_y)}{lbl}{sep}")
+        cur = f"[o{i}]"
+    return "".join(parts)
+
+
+def _amix_chain(n: int) -> str:
+    """Mix all N panels' audio. Each panel's music/hitsound levels are baked in at
+    danser render time (per-side patch), so a straight sum (normalize=0) honours them
+    — e.g. P1 music=1 / others music=0 gives one music bed under everyone's hitsounds.
+    normalize=0 stops amix auto-attenuating by input count (so muted sides don't quiet
+    the mix); alimiter then catches any peaks the sum pushes past 0 dBFS."""
+    ins = "".join(f"[{i + 1}:a]" for i in range(n))
+    return (f"{ins}amix=inputs={n}:normalize=0:dropout_transition=0,"
+            "alimiter=limit=0.95:attack=5:release=50[amx]")
+
+
+def composite(overlay_png: Path, clips: list[Path], panels: list[PanelRect], out: Path,
               trim_to: float | None = None, fade: float = 0.4,
               encoder: str = "x264", quality: str = "high") -> None:
-    """Overlay the two panels into the chrome. If trim_to is given, end the
+    """Overlay every gameplay panel into the chrome. If trim_to is given, end the
     gameplay there with a short fade (cuts danser's long post-song tail)."""
-    vchain = (
-        f"[1:v]scale={_s(L.dz_w)}:{_s(L.dz_h)}:flags=bicubic,setsar=1[A];"
-        f"[2:v]scale={_s(L.dz_w)}:{_s(L.dz_h)}:flags=bicubic,setsar=1[B];"
-        f"[0:v][A]overlay={_s(L.dz_lx)}:{_s(L.dz_y)}[a];"
-        f"[a][B]overlay={_s(L.dz_rx)}:{_s(L.dz_y)}"
-    )
-    # Mix BOTH panels' audio. Each side's music/hitsound levels are baked in at
-    # danser render time (per-side patch), so a straight sum (normalize=0) honours
-    # them — e.g. P1 music=1 / P2 music=0 gives a single music bed under both
-    # players' hitsounds. normalize=0 stops amix from auto-attenuating by input
-    # count so muted sides don't quiet the mix; alimiter then catches any peaks the
-    # sum pushes past 0 dBFS, so loud sections don't clip/distort.
-    amix = ("[1:a][2:a]amix=inputs=2:normalize=0:dropout_transition=0,"
-            "alimiter=limit=0.95:attack=5:release=50[amx]")
+    if len(clips) != len(panels):
+        raise ValueError(f"composite: {len(clips)} clips but {len(panels)} panels.")
+    vchain = _overlay_chain(panels)
+    amix = _amix_chain(len(clips))
     cmd = [FFMPEG, "-y",
-           "-loop", "1", "-framerate", str(FPS), "-i", str(overlay_png),
-           "-i", str(left_mp4), "-i", str(right_mp4)]
+           "-loop", "1", "-framerate", str(FPS), "-i", str(overlay_png)]
+    for c in clips:
+        cmd += ["-i", str(c)]
 
     if trim_to and trim_to > fade:
         st = trim_to - fade
@@ -634,6 +951,10 @@ def _cmp_rows(Lp, Rp) -> str:
 def build_endcard_html(match: MatchData, cache: Path) -> str:
     """Versus-table end card with compact identity cards. Seekable via
     window.seek(t): slide-in, count-up, bar-fill, winner banner."""
+    # 3–4 players use the multi-player leaderboard / team results; 1v1 keeps its
+    # bespoke versus card (byte-identical to before).
+    if len(match.players) > 2:
+        return build_multi_endcard_html(match, cache)
     Lp, Rp, M = match.left, match.right, match.map
     win = match.winner_side
     repl = {
@@ -653,6 +974,93 @@ def build_endcard_html(match: MatchData, cache: Path) -> str:
         "ROWS": _cmp_rows(Lp, Rp),
     }
     html = _ENDCARD_TEMPLATE
+    for k, v in repl.items():
+        html = html.replace("%%" + k + "%%", str(v))
+    return html
+
+
+def _player_meta(p: PlayerData, cache: Path) -> str:
+    rank = p.rank_display if (p.rank_display and p.rank_display != "—") else ""
+    bits = [b for b in (_flag_html(p, cache),
+                        f"<span>{_esc(rank)}</span>" if rank else "",
+                        f"<span>{_esc(p.mods)}</span>") if b]
+    return "".join(bits)
+
+
+def _ffa_endcard_body(match: MatchData, cache: Path) -> str:
+    """A ranked leaderboard: one row per player, best score first, #1 highlighted."""
+    ranking = match.ranking()
+    maxscore = max((p.score for p in match.players), default=1) or 1
+    rows = []
+    for pos, idx in enumerate(ranking):
+        p = match.players[idx]
+        win = (pos == 0)
+        rankmark = "&#9818;" if win else f"#{pos + 1}"      # crown for the winner
+        rows.append(
+            f'<div class="lbrow reveal{" winrow" if win else ""}" data-i="{pos + 1}" '
+            f'style="--c:{p.accent}">'
+            f'<div class="rank">{rankmark}</div>'
+            f'<div class="ava">{_avatar_html(p)}</div>'
+            f'<div class="who"><div class="nm">{_esc(p.display_name)}</div>'
+            f'<div class="meta">{_player_meta(p, cache)}</div></div>'
+            f'<div class="stat"><div class="sv countup" data-final="{p.score}" data-fmt="num">0</div><div class="sl">score</div></div>'
+            f'<div class="stat"><div class="sv countup" data-final="{p.accuracy:.2f}" data-fmt="pct">0.00</div><div class="sl">acc %</div></div>'
+            f'<div class="stat"><div class="sv countup" data-final="{p.max_combo}" data-fmt="combo">0</div><div class="sl">combo</div></div>'
+            f'<div class="gbadge" style="color:{_grade_color(p.grade)}">{_esc(p.grade)}</div>'
+            f'<div class="sbar"><span data-w="{p.score / maxscore * 100:.1f}"></span></div>'
+            f'</div>'
+        )
+    return f'<div class="board board-n{len(match.players)}">{"".join(rows)}</div>'
+
+
+def _team_endcard_body(match: MatchData, cache: Path) -> str:
+    """Two team columns with combined score + members; winning team highlighted."""
+    win_team = match.winner()
+    cols = []
+    for col, t in enumerate(match.team_ids()):
+        accent = TEAM_ACCENTS[t % len(TEAM_ACCENTS)][0]
+        members = [i for i in range(len(match.players)) if match.teams[i] == t]
+        mem_html = []
+        for i in members:
+            p = match.players[i]
+            mem_html.append(
+                f'<div class="tmem" style="--c:{p.accent}">'
+                f'<div class="ava sm">{_avatar_html(p)}</div>'
+                f'<div class="who"><div class="nm sm">{_esc(p.display_name)}</div>'
+                f'<div class="meta">{_player_meta(p, cache)}</div></div>'
+                f'<div class="mstat"><div class="msc countup" data-final="{p.score}" data-fmt="num">0</div>'
+                f'<div class="macc"><span class="countup" data-final="{p.accuracy:.2f}" data-fmt="pct">0.00</span>%</div></div>'
+                f'<div class="gbadge sm" style="color:{_grade_color(p.grade)}">{_esc(p.grade)}</div>'
+                f'</div>'
+            )
+        is_win = (t == win_team)
+        cols.append(
+            f'<div class="tcol reveal{" winrow" if is_win else ""}" data-i="{col + 1}" '
+            f'style="--c:{accent}">'
+            f'<div class="thead"><span class="tname">TEAM {chr(65 + col)}</span>'
+            f'<span class="ttot countup" data-final="{match.team_score(t)}" data-fmt="num">0</span>'
+            f'<span class="tlab">total score</span>'
+            f'<span class="winbadge">&#9818; WINNER</span></div>'
+            f'<div class="tmembers">{"".join(mem_html)}</div>'
+            f'</div>'
+        )
+    return f'<div class="teams">{"".join(cols)}</div>'
+
+
+def build_multi_endcard_html(match: MatchData, cache: Path) -> str:
+    """Results card for 3–4 players: a ranked FFA leaderboard, or two team columns
+    in 2v2. Seekable via window.seek(t) — staggered reveal, count-up, winner pulse —
+    so render_endcard_video can frame-step it exactly like the 1v1 card."""
+    M = match.map
+    diff = f"[{M.version}]" if M.version else ""
+    body = (_team_endcard_body(match, cache) if (match.mode == "team" and match.teams)
+            else _ffa_endcard_body(match, cache))
+    repl = {
+        "MATCH_TITLE": _esc(match.match_title),
+        "MAP_LINE": _esc(f"{M.artist} - {M.title} {diff}".strip(" -")) + f" &middot; &#9733;{M.star_rating:.2f}",
+        "BODY": body,
+    }
+    html = _MULTI_ENDCARD_TEMPLATE
     for k, v in repl.items():
         html = html.replace("%%" + k + "%%", str(v))
     return html
@@ -777,13 +1185,19 @@ def concat_videos(gameplay: Path, endcard: Path, out: Path,
 # Main
 # ----------------------------------------------------------------------------- #
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Render a side-by-side osu! overlay video from two replays")
-    ap.add_argument("left"); ap.add_argument("right")
+    ap = argparse.ArgumentParser(description="Render a side-by-side osu! overlay video from 2–4 replays")
+    ap.add_argument("replays", nargs="+", help="2–4 .osr replay files (first is P1)")
     ap.add_argument("--danser-bin", default=None)
     ap.add_argument("--danser-video-dir", default=None)
     ap.add_argument("--match-json", default=None)
-    ap.add_argument("--left-id", type=int, default=None)
-    ap.add_argument("--right-id", type=int, default=None)
+    ap.add_argument("--left-id", type=int, default=None, help="P1 osu! id override (legacy 1v1)")
+    ap.add_argument("--right-id", type=int, default=None, help="P2 osu! id override (legacy 1v1)")
+    ap.add_argument("--ids", nargs="*", type=int, default=None,
+                    help="per-player osu! id overrides by position (0=use username)")
+    ap.add_argument("--mode", choices=["ffa", "team"], default="ffa",
+                    help="ffa = everyone ranked individually; team = 2v2 combined scores")
+    ap.add_argument("--teams", nargs="*", type=int, default=None,
+                    help="team index per player (team mode only), e.g. 0 1 0 1")
     ap.add_argument("--title", default="friendly · bo1")
     ap.add_argument("--cache", default="cache")
     ap.add_argument("--chrome-only", action="store_true")
@@ -798,6 +1212,9 @@ def main() -> None:
     ap.add_argument("--skins-dir", default=None, help="osu! Skins folder danser reads skins from (its OsuSkinsDir)")
     ap.add_argument("--left-skin", default=None, help="danser skin name for the left player's panel")
     ap.add_argument("--right-skin", default=None, help="danser skin name for the right player's panel")
+    ap.add_argument("--skins", nargs="*", default=None,
+                    help="per-player skin names by position (blank/'-' = default skin). "
+                         "Overrides --left-skin/--right-skin when given.")
     ap.add_argument("--resolution", choices=list(RES_SCALES.keys()), default="1080p", help="output resolution")
     ap.add_argument("--fps", type=int, default=60, help="output framerate (danser render + composite)")
     ap.add_argument("--ffmpeg", default=None,
@@ -818,6 +1235,10 @@ def main() -> None:
     ap.add_argument("--right-music-volume", type=float, default=None, help="0-1 P2 music (default 0.0, avoids doubling the same track)")
     ap.add_argument("--left-hitsound-volume", type=float, default=None, help="0-1 P1 hitsounds (default 1.0)")
     ap.add_argument("--right-hitsound-volume", type=float, default=None, help="0-1 P2 hitsounds (default 1.0)")
+    ap.add_argument("--player-music", nargs="*", type=float, default=None,
+                    help="per-player 0-1 music volume by position (default: P1=1.0, rest=0.0)")
+    ap.add_argument("--player-hits", nargs="*", type=float, default=None,
+                    help="per-player 0-1 hitsound volume by position (default 1.0)")
     ap.add_argument("--encoder", choices=list(ENCODERS), default="x264",
                     help="video encoder for the composite + end card (default x264)")
     ap.add_argument("--quality", choices=QUALITY_LEVELS, default="high",
@@ -844,6 +1265,10 @@ def main() -> None:
     ap.add_argument("--trail-length", type=float, default=1.0,
                     help="cursor-trail length multiplier (1.0 = danser default)")
     ap.add_argument("--hide-pp", action="store_true", help="hide the pp counter")
+    ap.add_argument("--pp-x", type=float, default=0.86,
+                    help="pp/hit-count horizontal position, 0=left .. 1=right (default 0.86)")
+    ap.add_argument("--pp-y", type=float, default=0.88,
+                    help="pp/hit-count vertical position, 0=top .. 1=bottom (default 0.88)")
     ap.add_argument("--hide-hitcounts", action="store_true", help="hide the 300/100/50/miss counts")
     ap.add_argument("--hide-hiterror", action="store_true", help="hide the hit-error bar")
     ap.add_argument("--hide-keys", action="store_true", help="hide the key overlay")
@@ -863,25 +1288,46 @@ def main() -> None:
 
     cache = Path(args.cache); cache.mkdir(parents=True, exist_ok=True)
 
+    osr_paths = list(args.replays)
+    n = len(osr_paths)
+    if not (2 <= n <= 4):
+        raise SystemExit(f"CircleClash renders 2–4 replays; got {n}.")
+    validate_sync(osr_paths)           # all panels must run at the same speed to stay locked
+    # per-player osu! id overrides: explicit --ids by position, else the legacy
+    # --left-id/--right-id for the first two, else none.
+    if args.ids is not None:
+        id_overrides = [(args.ids[i] if i < len(args.ids) else None) for i in range(n)]
+    else:
+        id_overrides = ([args.left_id, args.right_id] + [None] * n)[:n]
+    teams = list(args.teams) if (args.mode == "team" and args.teams) else None
+
     if args.match_json:
         print(f"Loading {args.match_json} ...")
         d = json.loads(Path(args.match_json).read_text())
+        def _pd(pdict):
+            return PlayerData(**{k: v for k, v in pdict.items() if k in PlayerData.__annotations__})
+        # players[] is the current shape; fall back to legacy left/right dicts.
+        if d.get("players"):
+            players = [_pd(p) for p in d["players"]]
+        else:
+            players = [_pd(d["left"]), _pd(d["right"])]
         match = MatchData(
-            left=PlayerData(**{k: v for k, v in d["left"].items() if k in PlayerData.__annotations__}),
-            right=PlayerData(**{k: v for k, v in d["right"].items() if k in PlayerData.__annotations__}),
+            players=players,
             map=MapData(**{k: v for k, v in d["map"].items() if k in MapData.__annotations__}),
             match_title=d.get("match_title", args.title),
+            mode=d.get("mode", "ffa"),
+            teams=d.get("teams"),
         )
     else:
         print("Assembling match data ...")
-        match = assemble_match(args.left, args.right, cache_dir=args.cache,
-                               left_id=args.left_id, right_id=args.right_id, match_title=args.title)
+        match = assemble_match(osr_paths, cache_dir=args.cache, id_overrides=id_overrides,
+                               match_title=args.title, mode=args.mode, teams=teams)
+
+    names = " · ".join(p.display_name for p in match.players)
     if match.map.title or match.map.artist:
-        print(f"  {match.left.display_name} vs {match.right.display_name}  ·  "
-              f"{match.map.artist} - {match.map.title} ★{match.map.star_rating:.2f}")
+        print(f"  {names}  ·  {match.map.artist} - {match.map.title} ★{match.map.star_rating:.2f}")
     else:
-        print(f"  {match.left.display_name} vs {match.right.display_name}  ·  "
-              f"(map metadata unavailable — no osu! API key)")
+        print(f"  {names}  ·  (map metadata unavailable — no osu! API key)")
 
     if args.endcard_preview:
         print("Rendering end-card preview ...")
@@ -949,13 +1395,40 @@ def main() -> None:
         if status in ("unresolved", "download_failed"):
             print("  (continuing anyway in case danser already has it cached)")
 
-    def _vol(side, glob, default):
-        return side if side is not None else (glob if glob is not None else default)
-    lm = _vol(args.left_music_volume, args.music_volume, 1.0)
-    rm = _vol(args.right_music_volume, args.music_volume, 0.0)
-    lh = _vol(args.left_hitsound_volume, args.hitsound_volume, 1.0)
-    rh = _vol(args.right_hitsound_volume, args.hitsound_volume, 1.0)
-    print(f"  audio: P1 music {lm:.2f} / hits {lh:.2f}  ·  P2 music {rm:.2f} / hits {rh:.2f}")
+    if len(match.players) != n:
+        raise SystemExit(f"match has {len(match.players)} players but {n} replays were given.")
+
+    def _vol(side, glob):
+        return side if side is not None else glob
+
+    # Per-player audio: explicit --player-music/-hits by position win; else the legacy
+    # --left/right values for the first two; else defaults (only P1 carries the music
+    # bed so the shared track isn't doubled, and everyone's hitsounds stay on).
+    def _pp(i, per, legacy, default):
+        if per is not None and i < len(per) and per[i] is not None:
+            return per[i]
+        if i < len(legacy) and legacy[i] is not None:
+            return legacy[i]
+        return default
+    leg_music = [_vol(args.left_music_volume, args.music_volume),
+                 _vol(args.right_music_volume, args.music_volume)]
+    leg_hits = [_vol(args.left_hitsound_volume, args.hitsound_volume),
+                _vol(args.right_hitsound_volume, args.hitsound_volume)]
+    musics = [_pp(i, args.player_music, leg_music, 1.0 if i == 0 else 0.0) for i in range(n)]
+    hits = [_pp(i, args.player_hits, leg_hits, 1.0) for i in range(n)]
+
+    # Per-player skin: --skins by position (blank/'-' = default) overrides the legacy
+    # --left-skin/--right-skin.
+    leg_skins = [args.left_skin, args.right_skin]
+    def _skin_at(i):
+        if args.skins is not None and i < len(args.skins):
+            s = args.skins[i]
+            return None if (not s or s == "-") else s
+        return leg_skins[i] if i < len(leg_skins) else None
+    skins = [_skin_at(i) for i in range(n)]
+
+    print("  audio: " + "  ·  ".join(
+        f"P{i + 1} music {musics[i]:.2f}/hits {hits[i]:.2f}" for i in range(n)))
 
     skin_hits = not args.beatmap_hitsounds
     vis = {
@@ -966,45 +1439,43 @@ def main() -> None:
         "prominent_ur": args.prominent_ur, "ignore_sample_volume": args.ignore_sample_volume,
         "show_mods": args.show_mods, "cursor_size": args.cursor_size,
         "trail_length": args.trail_length,
+        "pp_x": args.pp_x, "pp_y": args.pp_y,
         "show_pp": not args.hide_pp, "show_hitcounts": not args.hide_hitcounts,
         "show_hiterror": not args.hide_hiterror, "show_keys": not args.hide_keys,
         "show_combo": not args.hide_combo,
     }
-    left_patch = _render_patch(match.left.accent, skin=args.left_skin, songs_dir=args.songs_dir,
-                               skins_dir=args.skins_dir, music_vol=lm,
-                               hit_vol=lh, master_vol=args.master_volume, force_skin_hits=skin_hits,
-                               vis=vis)
-    right_patch = _render_patch(match.right.accent, skin=args.right_skin, songs_dir=args.songs_dir,
-                                skins_dir=args.skins_dir, music_vol=rm,
-                                hit_vol=rh, master_vol=args.master_volume, force_skin_hits=skin_hits,
-                                vis=vis)
-    print(f"  danser panel resolution: {L.dz_w}x{L.dz_h} (no crop)  ·  stats tinted per side")
+    panels = panels_for(n, match.mode)
+    patches = [
+        _render_patch(match.players[i].accent, skin=skins[i], songs_dir=args.songs_dir,
+                      skins_dir=args.skins_dir, music_vol=musics[i], hit_vol=hits[i],
+                      master_vol=args.master_volume, force_skin_hits=skin_hits, vis=vis,
+                      panel=panels[i])
+        for i in range(n)
+    ]
+    print(f"  danser panel resolution: {panels[0].dz_w}x{panels[0].dz_h} (no crop)  ·  "
+          f"{n} panel{'s' if n != 1 else ''}, stats tinted per side")
 
     if not args.skip_render:
         _refresh_danser_db(danser, staged_status=staged_status)
         force_nf = not args.keep_fails
-        l_mods2 = _mods2_arg(args.left, force_nofail=force_nf)
-        r_mods2 = _mods2_arg(args.right, force_nofail=force_nf)
-        nf_sides = [s for s, m in (("P1", l_mods2), ("P2", r_mods2)) if m]
+        mods2 = [_mods2_arg(osr_paths[i], force_nofail=force_nf) for i in range(n)]
+        nf_sides = [f"P{i + 1}" for i in range(n) if mods2[i]]
         if nf_sides:
             print(f"  no-fail: {', '.join(nf_sides)} detected as osu!lazer -> rendering NoFail "
                   f"(stops danser's false fails; stable replays untouched)")
-        t0 = time.time()
-        sync_poc.render_replay(danser, Path(args.left), "ov_left",
-                               extra_args=[a for a in (left_patch, l_mods2) if a])
-        left_mp4 = sync_poc.locate_output(video_dir, "ov_left", t0)
-        t1 = time.time()
-        sync_poc.render_replay(danser, Path(args.right), "ov_right",
-                               extra_args=[a for a in (right_patch, r_mods2) if a])
-        right_mp4 = sync_poc.locate_output(video_dir, "ov_right", t1)
+        clips = []
+        for i in range(n):
+            t = time.time()
+            sync_poc.render_replay(danser, Path(osr_paths[i]), f"ov_{i}",
+                                   extra_args=[a for a in (patches[i], mods2[i]) if a])
+            clips.append(sync_poc.locate_output(video_dir, f"ov_{i}", t))
     else:
-        left_mp4 = sync_poc.locate_output(video_dir, "ov_left", 0)
-        right_mp4 = sync_poc.locate_output(video_dir, "ov_right", 0)
+        clips = [sync_poc.locate_output(video_dir, f"ov_{i}", 0) for i in range(n)]
+
+    report_sync(clips)                 # informational: warn if panel lengths diverge
 
     # trim danser's long post-song outro: end gameplay shortly after the last note
-    end_l = replay_end_seconds(args.left)
-    end_r = replay_end_seconds(args.right)
-    play_end = max(end_l, end_r)
+    play_end = max(replay_end_seconds(p) for p in osr_paths)
     trim_to = (play_end + args.tail_seconds) if play_end > 0 else None
     if trim_to:
         print(f"  last note ~{play_end:.1f}s -> trimming gameplay to {trim_to:.1f}s (+{args.tail_seconds:.1f}s tail)")
@@ -1014,27 +1485,37 @@ def main() -> None:
     quality = args.quality
 
     # x264 (CPU) is the reliable default; the NVENC options are an opt-in. If the
-    # chosen GPU encoder can't actually open here (e.g. av1_nvenc needs a newer
-    # NVIDIA driver than installed), fall back to x264 so the render still finishes
-    # instead of dying minutes in at the composite step.
-    if encoder != "x264" and not _encoder_available(encoder):
-        print(f"  ! encoder '{ENCODERS[encoder]['label']}' isn't usable on this "
-              f"system — your GPU driver may be too old for it. Falling back to "
-              f"x264 (CPU). Pick NVENC H.264/HEVC in Settings if your driver "
-              f"supports those, or update your NVIDIA driver for AV1.")
-        encoder = "x264"
+    # chosen GPU encoder can't open with our ffmpeg, first try a *system* ffmpeg (the
+    # bundled build is bleeding-edge and can outrun the driver's NVENC API, while the
+    # distro's ffmpeg usually matches it — danser itself uses the system one). Only if
+    # that also fails do we drop to x264, and we always say WHY.
+    if encoder != "x264":
+        ok, reason = _encoder_check(encoder)
+        if not ok:
+            alt = shutil.which("ffmpeg")
+            if alt and Path(alt).resolve() != Path(FFMPEG).resolve():
+                ok_alt, _ = _encoder_check(encoder, ffmpeg_bin=alt)
+                if ok_alt:
+                    print(f"  {ENCODERS[encoder]['label']}: unavailable via the bundled ffmpeg "
+                          f"({reason}) — switching to system ffmpeg ({alt}), which supports it.")
+                    FFMPEG = alt
+                    ok = True
+            if not ok:
+                print(f"  ! {ENCODERS[encoder]['label']}: {reason}")
+                print("    Falling back to x264 (CPU) so the render still completes.")
+                encoder = "x264"
 
     print(f"  encoder: {ENCODERS[encoder]['label']}  ·  quality: {quality}")
 
     out = Path(args.out)
     if args.no_endcard:
-        composite(png, left_mp4, right_mp4, out, trim_to=trim_to, encoder=encoder, quality=quality)
+        composite(png, clips, panels, out, trim_to=trim_to, encoder=encoder, quality=quality)
         print(f"\nDone -> {out}")
         return
 
     # gameplay to a temp file, then append the animated end card
     gameplay = Path("_gameplay.mp4")
-    composite(png, left_mp4, right_mp4, gameplay, trim_to=trim_to, encoder=encoder, quality=quality)
+    composite(png, clips, panels, gameplay, trim_to=trim_to, encoder=encoder, quality=quality)
     endcard = Path("_endcard.mp4")
     render_endcard_video(match, cache, endcard, speed=args.endcard_speed,
                          hold_sec=args.endcard_seconds, fade_sec=args.endcard_fade,
@@ -1336,6 +1817,147 @@ html,body{width:1920px;height:1080px;overflow:hidden;font-family:"Exo 2",sans-se
       wEl.style.filter='drop-shadow(0 0 '+(16*pulse)+'px var(--c))';
       if(loser) loser.style.opacity=String(1-0.22*clamp((t-1.7)/0.5));
     }
+  };
+  window.seek(0);
+</script>
+</body></html>"""
+
+
+# ============================================================================= #
+# MULTI-PLAYER END-CARD TEMPLATE — 3–4 player leaderboard / 2v2 team results.
+# Seekable via window.seek(t), same contract as the 1v1 card.
+# ============================================================================= #
+_MULTI_ENDCARD_TEMPLATE = r"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@400;500;700;800;900&family=JetBrains+Mono:wght@400;500;700&family=Orbitron:wght@500;700;900&display=swap" rel="stylesheet">
+<style>
+:root{--ink:#0a0a0d;--pink:#ff66ab;--ice:#66d9ff;--line:#23232c;--muted:#7d7488;}
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{width:1920px;height:1080px;overflow:hidden;font-family:"Exo 2",sans-serif;}
+#stage{position:absolute;inset:0;color:#f3ecf7;
+  background:radial-gradient(120% 80% at 0% 50%,rgba(255,102,171,.15),transparent 55%),
+             radial-gradient(120% 80% at 100% 50%,rgba(102,217,255,.15),transparent 55%),var(--ink);}
+#stage::before{content:"";position:absolute;inset:0;z-index:1;pointer-events:none;
+  background:repeating-linear-gradient(0deg,transparent 0 3px,rgba(255,255,255,.013) 3px 4px);}
+.grid{position:absolute;inset:0;z-index:0;opacity:.4;
+  background:linear-gradient(90deg,rgba(255,255,255,.035) 1px,transparent 1px) 0 0/76px 100%;}
+.trifield{position:absolute;inset:0;z-index:0;overflow:hidden;}
+.tri{position:absolute;}
+
+.head{position:absolute;top:38px;left:0;right:0;text-align:center;z-index:5;}
+.head .eyebrow{font-family:"JetBrains Mono",monospace;font-size:13px;letter-spacing:8px;text-transform:uppercase;color:var(--muted);}
+.head .ttl{font-weight:900;font-size:46px;letter-spacing:3px;margin-top:6px;}
+.head .map{font-family:"JetBrains Mono",monospace;font-size:14px;color:var(--muted);margin-top:7px;}
+
+.flagimg{width:28px;height:19px;border-radius:3px;object-fit:cover;box-shadow:0 0 0 1px rgba(255,255,255,.15);}
+.flagtxt{font-weight:700;color:#e9e2f0;}
+.ava{width:88px;height:88px;border-radius:50%;border:4px solid var(--c);overflow:hidden;flex:none;
+  background:radial-gradient(circle at 35% 30%,#2c2336,#100c16);display:grid;place-items:center;font-weight:900;font-size:32px;color:var(--c);box-shadow:0 0 22px -6px var(--c);}
+.ava.sm{width:62px;height:62px;border-width:3px;font-size:22px;}
+.ava img{width:100%;height:100%;object-fit:cover;}
+.who{flex:1;min-width:0;}
+.nm{font-weight:900;font-size:33px;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.nm.sm{font-size:24px;}
+.meta{margin-top:7px;display:flex;align-items:center;gap:10px;font-family:"JetBrains Mono",monospace;font-size:14px;color:var(--muted);}
+.gbadge{flex:none;border-radius:14px;display:grid;place-items:center;font-family:"Orbitron";font-weight:900;
+  border:2px solid currentColor;background:rgba(255,255,255,.03);width:92px;height:92px;font-size:54px;}
+.gbadge.sm{width:60px;height:60px;font-size:32px;border-radius:10px;}
+.winbadge{display:none;align-items:center;gap:8px;background:linear-gradient(135deg,var(--c),#fff);
+  color:#160f1d;font-weight:900;font-size:16px;letter-spacing:2px;padding:6px 14px;border-radius:8px;text-transform:uppercase;}
+.winrow .winbadge{display:inline-flex;}
+
+/* FFA leaderboard */
+.board{position:absolute;left:50%;top:208px;transform:translateX(-50%);width:1560px;z-index:3;
+  display:flex;flex-direction:column;gap:22px;}
+.board-n4{gap:16px;top:196px;}
+.lbrow{position:relative;display:flex;align-items:center;gap:26px;height:150px;padding:0 34px;
+  border:2px solid var(--line);border-radius:18px;overflow:hidden;
+  background:linear-gradient(90deg,rgba(255,255,255,.03),rgba(14,11,18,.5));}
+.board-n4 .lbrow{height:132px;}
+.rank{font-family:"Orbitron";font-weight:900;font-size:38px;color:var(--c);min-width:66px;text-align:center;}
+.stat{text-align:center;min-width:148px;}
+.sv{font-family:"Orbitron";font-weight:700;font-size:29px;line-height:1;}
+.sl{font-family:"JetBrains Mono",monospace;font-size:10px;letter-spacing:2px;color:var(--muted);text-transform:uppercase;margin-top:5px;}
+.board-n4 .gbadge{width:78px;height:78px;font-size:44px;}
+.sbar{position:absolute;left:0;bottom:0;height:5px;width:100%;background:#16131c;}
+.sbar span{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--c),#fff);}
+
+/* 2v2 team columns */
+.teams{position:absolute;left:50%;top:214px;transform:translateX(-50%);width:1640px;z-index:3;
+  display:flex;gap:44px;justify-content:center;}
+.tcol{flex:1;border:2px solid var(--line);border-radius:20px;padding:26px 30px;position:relative;
+  background:linear-gradient(180deg,rgba(255,255,255,.03),rgba(14,11,18,.55));min-height:600px;}
+.thead{display:flex;flex-direction:column;align-items:center;gap:4px;padding-bottom:22px;border-bottom:1px solid var(--line);}
+.tname{font-family:"Orbitron";font-weight:900;font-size:30px;letter-spacing:3px;color:var(--c);}
+.ttot{font-family:"Orbitron";font-weight:900;font-size:58px;line-height:1;}
+.tlab{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:3px;color:var(--muted);text-transform:uppercase;}
+.thead .winbadge{margin-top:12px;}
+.tmembers{display:flex;flex-direction:column;gap:18px;margin-top:24px;}
+.tmem{display:flex;align-items:center;gap:16px;padding:14px 18px;border:1px solid var(--line);border-radius:14px;background:rgba(0,0,0,.2);}
+.mstat{margin-left:auto;text-align:right;min-width:150px;}
+.msc{font-family:"Orbitron";font-weight:700;font-size:25px;line-height:1;}
+.macc{font-family:"JetBrains Mono",monospace;font-size:14px;color:var(--muted);margin-top:4px;}
+</style></head>
+<body><div id="stage">
+  <div class="grid"></div>
+  <div class="trifield" id="tris"></div>
+
+  <div class="head" id="head">
+    <div class="eyebrow">final results</div>
+    <div class="ttl">%%MATCH_TITLE%%</div>
+    <div class="map">%%MAP_LINE%%</div>
+  </div>
+
+  %%BODY%%
+</div>
+<script>
+  const PAL=['#ff66ab','#66d9ff','#8be01f','#ffd24a'];
+  const tf=document.getElementById('tris');
+  for(let i=0;i<28;i++){
+    const size=20+Math.random()*50;
+    const t=document.createElementNS('http://www.w3.org/2000/svg','svg');
+    t.setAttribute('viewBox','0 0 100 100');t.setAttribute('width',size);t.setAttribute('height',size);
+    t.classList.add('tri');
+    t.innerHTML='<polygon points="50,5 95,95 5,95" fill="'+PAL[Math.floor(Math.random()*PAL.length)]+'"/>';
+    t.style.left=(Math.random()*100)+'%';t.style.top=(Math.random()*100)+'%';
+    t.style.transform='rotate('+(Math.random()*40-20)+'deg)';
+    t.style.opacity=(.05+Math.random()*.08).toFixed(3);
+    tf.appendChild(t);
+  }
+  const clamp=(x)=>Math.max(0,Math.min(1,x));
+  const ease=(x)=>1-Math.pow(1-clamp(x),3);
+  const back=(x)=>{x=clamp(x);const c=1.9;return 1+(c+1)*Math.pow(x-1,3)+c*Math.pow(x-1,2);};
+  const fmtNum=(n)=>Math.round(n).toLocaleString('en-US');
+
+  window.seek=function(t){
+    document.getElementById('head').style.opacity=ease(t/0.5);
+    document.querySelectorAll('.reveal').forEach(el=>{
+      const i=+(el.dataset.i||1);
+      const s=ease((t-0.1-i*0.13)/0.5);
+      el.style.opacity=s;
+      el.style.transform='translateY('+(34*(1-s))+'px)';
+    });
+    const cu=ease((t-0.6)/1.2);
+    document.querySelectorAll('.countup').forEach(el=>{
+      const f=parseFloat(el.dataset.final), fmt=el.dataset.fmt, v=f*cu;
+      if(fmt==='pct') el.textContent=v.toFixed(2);
+      else if(fmt==='combo') el.textContent=Math.round(v)+'x';
+      else el.textContent=fmtNum(v);
+    });
+    document.querySelectorAll('.sbar span').forEach(b=>{
+      b.style.width=(parseFloat(b.dataset.w)*clamp((t-0.7)/1.0))+'%';
+    });
+    document.querySelectorAll('.winrow').forEach(el=>{
+      const o=clamp((t-1.7)/0.4);
+      const pulse=t>2.1?(1+0.06*Math.sin((t-2.1)*6)*Math.exp(-(t-2.1)*2.2)):1;
+      el.style.borderColor=o>0.05?'var(--c)':'';
+      el.style.boxShadow='0 0 '+(46*pulse*o)+'px -10px var(--c)';
+      el.querySelectorAll('.winbadge').forEach(w=>{
+        w.style.opacity=o;
+        w.style.transform='scale('+(0.6+0.4*clamp(back((t-1.7)/0.6)))+')';
+      });
+    });
   };
   window.seek(0);
 </script>

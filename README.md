@@ -1,8 +1,9 @@
 # CircleClash
 
-Turn two osu! replays into a **side-by-side comparison video** — real gameplay rendered by
+Turn **2–4 osu! replays** into a **side-by-side comparison video** — real gameplay rendered by
 [danser-go](https://github.com/Wieku/danser-go), a styled neon overlay, and an animated results
-card at the end. Drop a `.osr` on each side, hit **Render**, get a shareable `.mp4`.
+card at the end. Drop a `.osr` on each side, hit **Render**, get a shareable `.mp4`. Supports
+1v1, free-for-all up to four players, and 2v2 teams.
 
 > Works with both **osu!stable** and **osu!lazer** replays. Lazer replays that danser would
 > falsely show as "failed" are auto-corrected.
@@ -29,8 +30,11 @@ you can move or delete as a unit.
 
 ### Linux
 
-There's no prebuilt Linux release — on Linux you run from source (it's a quick venv setup, and the
-app still provisions danser and ffmpeg itself). See [Linux — run from source](#linux--run-from-source) below.
+A prebuilt Linux build (`CircleClash-linux.zip`) is attached to each release — extract it and run
+the `CircleClash` binary inside. On first launch it provisions danser and ffmpeg into its own data
+folder, just like the Windows app. (The bundled Chromium may need your distro's usual Chromium
+runtime libraries present.) You can also still [run from source](#linux--run-from-source) if you
+prefer.
 
 ---
 
@@ -199,9 +203,17 @@ A short welcome appears and checks your setup. Then:
 ## Using CircleClash
 
 1. Drag a `.osr` replay onto **Player 1**, and another onto **Player 2** (or click a panel to browse).
+   Need more? Click **＋ Add player** for up to **four** players (all on the same beatmap).
 2. Pick each player's **skin**, the **resolution** and **FPS**.
-3. Press **Render**. Progress shows in the bar; expand **Show log** for details.
-4. The finished `.mp4` lands in your configured **output folder**.
+3. *(Optional)* Choose a **Mode**: *Free-for-all* ranks everyone individually, or *2v2 Teams*
+   (with four players) groups them into two teams — set each player's **Team A/B**.
+4. *(Optional)* Hit **Preview** and choose *Overlay frame* or *Results card* to render a quick
+   still (a few seconds, no gameplay) and check names, avatars and colours look right first.
+5. Press **Render**. Progress shows in the bar; expand **Show log** for details.
+6. The finished `.mp4` lands in your configured **output folder**.
+
+> The output layout adapts to the player count: **2** side by side, **3** in columns, **4** in a
+> 2×2 grid. More players means each panel (and its gameplay) is smaller.
 
 > Tip: for quick iteration render at **1080p / 60**. Full **4K / 240** looks great but takes much longer.
 
@@ -243,10 +255,14 @@ Credentials are stored only on your machine and are never committed to git.
 - **"ffmpeg not found"** — let CircleClash fetch it: it downloads ffmpeg on first run, or you can set
   the **ffmpeg binary** path in Settings → Paths. If you prefer a system ffmpeg, install it and make
   sure it's on your `PATH`, then reopen the app.
-- **NVENC encoder fails** — your GPU/driver doesn't support the chosen NVENC codec (AV1 needs an
-  RTX 40-series *and* a recent driver). CircleClash now detects this and **automatically falls back to
-  x264** so the render still finishes; pick **NVENC H.264/HEVC** or **x264** in Settings to avoid the
-  fallback, or update your NVIDIA driver for AV1.
+- **NVENC falls back to x264** — CircleClash pre-flights the GPU encoder and, if the bundled
+  ffmpeg can't open it, **automatically retries with your system ffmpeg** before dropping to x264
+  (the log says what it did and why). On a capable GPU the usual cause is that the bundled ffmpeg
+  is bleeding-edge and expects a newer driver than you have, while your distro's ffmpeg matches it
+  — so the auto-retry normally just works. If it still can't, the log names the reason (no NVENC in
+  either ffmpeg / driver's encode library not visible / AV1 needs an RTX 40-series). You can also
+  pin a specific ffmpeg in **Settings → Paths → ffmpeg binary** (a custom path now takes priority
+  over the auto-downloaded copy).
 - **The video won't play / looks broken in some players** — HEVC and AV1 aren't supported everywhere.
   For maximum compatibility (and for sharing locally), use the **x264** encoder.
 - **`externally-managed-environment` on pip (Linux)** — you skipped the virtual environment. Create
@@ -277,17 +293,17 @@ licenses and don't constrain this repository. CircleClash itself is released und
 ## For maintainers — building the apps
 
 A ready-to-use GitHub Actions workflow is included at `.github/workflows/build.yml`. It builds a
-**one-folder** [PyInstaller](https://pyinstaller.org/) app for **Windows**, zips it, and
-attaches them to the GitHub Release. To cut a release:
+**one-folder** [PyInstaller](https://pyinstaller.org/) app for **Windows and Linux** (a matrix
+build), zips each, and attaches them to the GitHub Release. To cut a release:
 
 ```bash
-git tag v1.1.0
-git push origin v1.1.0
+git tag v1.3.0
+git push origin v1.3.0
 ```
 
-The workflow then produces `CircleClash-windows.zip` and
-uploads them to the release for that tag. You can also trigger a test build manually from the
-**Actions** tab.
+The workflow then produces `CircleClash-windows.zip` and `CircleClash-linux.zip` and uploads them
+to the release for that tag. You can also trigger a test build manually from the **Actions** tab
+(**Run workflow**).
 
 How the packaging works (worth knowing if you tweak it):
 

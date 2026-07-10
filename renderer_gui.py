@@ -33,12 +33,13 @@ from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, Signal, QObject, Q
 from PySide6.QtGui import (
     QFont, QDragEnterEvent, QDropEvent, QPainter, QColor,
     QLinearGradient, QRadialGradient, QPen, QBrush, QFontMetrics, QTextCursor, QIcon,
+    QPixmap,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
     QVBoxLayout, QHBoxLayout, QGridLayout, QFileDialog, QPlainTextEdit,
     QProgressBar, QDialog, QDoubleSpinBox, QCheckBox, QFormLayout, QFrame,
-    QMessageBox, QGroupBox, QComboBox, QSlider, QScrollArea, QTabWidget,
+    QMessageBox, QGroupBox, QComboBox, QSlider, QScrollArea, QTabWidget, QMenu,
 )
 
 try:
@@ -74,6 +75,8 @@ PINK = "#ff66ab"
 ICE = "#66d9ff"
 GOLD = "#ffd24a"
 GREEN = "#7fe0a0"
+# Per-player drop-zone accents, matching the render palette (match_assembler.PALETTE).
+PLAYER_ACCENTS = ["#ff66ab", "#66d9ff", "#8be01f", "#ffd24a"]
 RED = "#ff6b81"
 INK = "#0a0a0d"
 INK2 = "#101015"
@@ -107,6 +110,11 @@ try:
     from osr_parser import parse_replay
 except Exception:
     parse_replay = None
+
+try:
+    from sync_poc import speed_multiplier
+except Exception:
+    speed_multiplier = None
 
 
 # --------------------------------------------------------------------------- #
@@ -148,6 +156,10 @@ DEFAULT_CONFIG = {
     "right_music_volume": 0,
     "right_hitsound_volume": 100,
     "master_volume": 100,
+    # per-player audio (0-100), indexed by player. Only P1 carries the music bed by
+    # default so the shared track isn't doubled; every player's hitsounds stay on.
+    "player_music": [100, 0, 0, 0],
+    "player_hits": [100, 100, 100, 100],
     # --- visual tweaks (danser HUD / background / cursor) ---
     "vis_bg_style": "dark",          # dark | dimmed | visible | blurred
     "vis_bloom": False,
@@ -161,6 +173,8 @@ DEFAULT_CONFIG = {
     "vis_cursor_size": 100,          # percent of danser default (12 osu!px)
     "vis_trail_length": 100,         # percent of danser default
     "vis_show_pp": True,
+    "vis_pp_x": 86,                  # pp/hit-count position: 0=left..100=right
+    "vis_pp_y": 88,                  # 0=top..100=bottom
     "vis_show_hitcounts": True,
     "vis_show_hiterror": True,
     "vis_show_keys": True,
@@ -181,6 +195,30 @@ def load_config() -> dict:
 
 def save_config(cfg: dict) -> None:
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+
+
+def player_music_vol(cfg: dict, i: int) -> int:
+    """Per-player music volume (0-100) with legacy left/right + default fallback."""
+    lst = cfg.get("player_music") or []
+    if i < len(lst):
+        return lst[i]
+    if i == 0:
+        return cfg.get("left_music_volume", cfg.get("music_volume", 100))
+    if i == 1:
+        return cfg.get("right_music_volume", 0)
+    return 0                            # extra players: no music bed by default
+
+
+def player_hits_vol(cfg: dict, i: int) -> int:
+    """Per-player hitsound volume (0-100) with legacy left/right + default fallback."""
+    lst = cfg.get("player_hits") or []
+    if i < len(lst):
+        return lst[i]
+    if i == 0:
+        return cfg.get("left_hitsound_volume", cfg.get("hitsound_volume", 100))
+    if i == 1:
+        return cfg.get("right_hitsound_volume", 100)
+    return 100
 
 
 def _sanitize(name: str) -> str:
@@ -430,6 +468,17 @@ class DropZone(QFrame):
         lay.addWidget(self.nameLabel)
         lay.addWidget(self.detailLabel)
 
+    def set_accent(self, accent: str):
+        """Recolour this zone (used when player slots are re-indexed after a removal)."""
+        self._accent = accent
+        self.titleLabel.setStyleSheet(f"color:{accent};background:transparent;")
+        self.tick.setStyleSheet(f"background:{accent};border:none;border-radius:1px;")
+        self._base_style(hot=False)
+
+    def set_title(self, title: str):
+        self._title = title
+        self.titleLabel.setText(title)
+
     def _radius(self) -> str:
         if self._side == "left":
             return "border-top-left-radius:14px;border-bottom-left-radius:14px;border-top-right-radius:5px;border-bottom-right-radius:5px;"
@@ -494,6 +543,77 @@ class DropZone(QFrame):
         self.detailLabel.show()
         self._base_style(hot=False)
         self.fileDropped.emit(f)
+
+
+class PlayerSlot(QWidget):
+    """One player column: a replay drop zone, a skin picker, and (in 2v2) a team
+    toggle plus a remove button. MainWindow keeps 2–4 of these in a row."""
+    changed = Signal()
+    removeRequested = Signal(object)
+    importRequested = Signal(object)
+
+    def __init__(self, index: int):
+        super().__init__()
+        self.index = index
+        self.accent = PLAYER_ACCENTS[index % len(PLAYER_ACCENTS)]
+        self.team = index % 2                       # default alternating -> column teams
+
+        v = QVBoxLayout(self); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(7)
+        self.zone = DropZone(f"PLAYER {index + 1}", self.accent, (".osr",),
+                             side="left" if index % 2 == 0 else "right")
+        self.zone.fileDropped.connect(lambda *_: self.changed.emit())
+        v.addWidget(self.zone, 1)
+
+        srow = QHBoxLayout(); srow.setSpacing(6)
+        self.skin = QComboBox()
+        self.importBtn = QPushButton("Import .osk")
+        self.importBtn.setToolTip("Import a .osk skin for this player")
+        self.importBtn.clicked.connect(lambda: self.importRequested.emit(self))
+        srow.addWidget(self.skin, 1); srow.addWidget(self.importBtn, 0)
+        v.addLayout(srow)
+
+        trow = QHBoxLayout(); trow.setSpacing(6)
+        self.teamBtn = QPushButton(); self.teamBtn.clicked.connect(self._cycle_team)
+        self.teamBtn.setVisible(False)
+        self._refresh_team_btn()
+        self.removeBtn = QPushButton("Remove player")
+        self.removeBtn.setToolTip("Remove this player from the comparison")
+        self.removeBtn.setStyleSheet(f"color:{RED};")
+        self.removeBtn.clicked.connect(lambda: self.removeRequested.emit(self))
+        trow.addWidget(self.teamBtn, 0); trow.addStretch(1); trow.addWidget(self.removeBtn, 0)
+        v.addLayout(trow)
+
+    @property
+    def path(self):
+        return self.zone.path
+
+    def skin_name(self) -> str | None:
+        t = self.skin.currentText()
+        return None if (not t or t.startswith("(default")) else t
+
+    def _cycle_team(self):
+        self.team = 1 - self.team
+        self._refresh_team_btn()
+        self.changed.emit()
+
+    def _refresh_team_btn(self):
+        self.teamBtn.setText(f"Team {'A' if self.team == 0 else 'B'}")
+        self.teamBtn.setStyleSheet(f"color:{PINK if self.team == 0 else ICE};font-weight:600;")
+
+    def set_team_visible(self, vis: bool):
+        self.teamBtn.setVisible(vis)
+
+    def set_removable(self, ok: bool):
+        self.removeBtn.setVisible(ok)
+
+    def reindex(self, i: int):
+        """Renumber/recolour after a slot is removed, and reset the default team."""
+        self.index = i
+        self.accent = PLAYER_ACCENTS[i % len(PLAYER_ACCENTS)]
+        self.zone.set_accent(self.accent)
+        self.zone.set_title(f"PLAYER {i + 1}")
+        self.team = i % 2
+        self._refresh_team_btn()
 
 
 # --------------------------------------------------------------------------- #
@@ -569,13 +689,60 @@ class WelcomeDialog(QDialog):
         return row
 
 
+class PreviewDialog(QDialog):
+    """Shows a rendered still (overlay frame or results card) scaled to fit, so the
+    user can sanity-check the design before starting a full render."""
+    def __init__(self, png_path: Path, label: str, parent=None):
+        super().__init__(parent)
+        self.png_path = Path(png_path)
+        self.setWindowTitle(f"Preview — {label}")
+        self.setStyleSheet(_theme_qss())
+
+        pix = QPixmap(str(self.png_path))
+        # Fit within a sensible window without upscaling past the source resolution.
+        max_w, max_h = 1100, 660
+        if not pix.isNull() and (pix.width() > max_w or pix.height() > max_h):
+            pix = pix.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+        root = QVBoxLayout(self); root.setContentsMargins(16, 16, 16, 16); root.setSpacing(12)
+        img = QLabel()
+        if pix.isNull():
+            img.setText("Couldn't load the preview image.")
+        else:
+            img.setPixmap(pix)
+        img.setAlignment(Qt.AlignCenter)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(img)
+        root.addWidget(scroll, 1)
+
+        note = QLabel("This is a still preview — gameplay isn't rendered here.")
+        note.setStyleSheet(f"color:{MUTED};font-size:12px;")
+        row = QHBoxLayout(); row.addWidget(note); row.addStretch(1)
+        openBtn = QPushButton("Open image"); openBtn.clicked.connect(self._open)
+        closeBtn = QPushButton("Close"); closeBtn.setProperty("role", "primary")
+        closeBtn.clicked.connect(self.accept)
+        row.addWidget(openBtn); row.addWidget(closeBtn)
+        root.addLayout(row)
+        self.resize(min(pix.width() + 60, 1160) if not pix.isNull() else 640,
+                    min(pix.height() + 130, 780) if not pix.isNull() else 480)
+
+    def _open(self):
+        p = str(self.png_path)
+        if sys.platform == "win32":
+            os.startfile(p)  # noqa
+        elif sys.platform == "darwin":
+            QProcess.startDetached("open", [p])
+        else:
+            QProcess.startDetached("xdg-open", [p])
+
+
 class SettingsDialog(QDialog):
-    def __init__(self, cfg: dict, parent=None):
+    def __init__(self, cfg: dict, parent=None, player_count: int = 2):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setMinimumWidth(600)
         self.setStyleSheet(_theme_qss())
         self.cfg = dict(cfg)
+        self.player_count = max(2, min(4, player_count))
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -718,38 +885,26 @@ class SettingsDialog(QDialog):
                                  "samples baked into each beatmap, for a consistent sound.")
         aul.addWidget(self.skinhits)
         sf = self._form()
-        self.vol_l_music = self._slider(cfg.get("left_music_volume", cfg.get("music_volume", 100)))
-        self.vol_l_hit = self._slider(cfg.get("left_hitsound_volume", cfg.get("hitsound_volume", 100)))
-        self.vol_r_music = self._slider(cfg.get("right_music_volume", 0))
-        self.vol_r_hit = self._slider(cfg.get("right_hitsound_volume", cfg.get("hitsound_volume", 100)))
+        # one music + hitsound slider per player, for the current player count
+        self.vol_music = []
+        self.vol_hits = []
+        for i in range(self.player_count):
+            m = self._slider(player_music_vol(cfg, i))
+            h = self._slider(player_hits_vol(cfg, i))
+            self.vol_music.append(m); self.vol_hits.append(h)
+            sf.addRow(f"P{i + 1} music", m["w"])
+            sf.addRow(f"P{i + 1} hitsounds", h["w"])
         self.vol_master = self._slider(cfg.get("master_volume", 100))
-        sf.addRow("P1 music", self.vol_l_music["w"])
-        sf.addRow("P1 hitsounds", self.vol_l_hit["w"])
-        sf.addRow("P2 music", self.vol_r_music["w"])
-        sf.addRow("P2 hitsounds", self.vol_r_hit["w"])
         sf.addRow("master", self.vol_master["w"])
         aul.addLayout(sf)
-        aul.addWidget(self._hint("Both players play the same song, so P2 music defaults to 0 to "
-                                 "avoid doubling the track. Turn it up to crossfade, or mute a "
-                                 "side's hitsounds to hear only one player."))
+        aul.addWidget(self._hint("Everyone plays the same song, so only P1 carries music by "
+                                 "default (others start at 0) to avoid doubling the track. Turn a "
+                                 "side up to crossfade, or mute a player's hitsounds to drop them "
+                                 "from the mix. These rows follow how many players you've added."))
         aul.addStretch(1)
 
         # Visual
         vl = self._tab(tabs, "Visual")
-        vf = self._form()
-        self.bgstyle = QComboBox()
-        for key, label in (("dark", "Dark (default)"), ("dimmed", "Dimmed background"),
-                           ("visible", "Background visible"), ("blurred", "Background blurred")):
-            self.bgstyle.addItem(label, key)
-        bi = self.bgstyle.findData(cfg.get("vis_bg_style", "dark"))
-        self.bgstyle.setCurrentIndex(bi if bi >= 0 else 0)
-        self.bgstyle.setToolTip("How much of the beatmap background shows behind the playfield.")
-        vf.addRow("background", self.bgstyle)
-        self.cursorsize = self._range_slider(cfg.get("vis_cursor_size", 100), 50, 200)
-        self.traillen = self._range_slider(cfg.get("vis_trail_length", 100), 25, 200)
-        vf.addRow("cursor size", self.cursorsize["w"])
-        vf.addRow("cursor trail", self.traillen["w"])
-        vl.addLayout(vf)
 
         def _chk(text, key, default, tip=""):
             c = QCheckBox(text); c.setChecked(cfg.get(key, default))
@@ -757,6 +912,40 @@ class SettingsDialog(QDialog):
                 c.setToolTip(tip)
             vl.addWidget(c)
             return c
+
+        # --- Background ---
+        vl.addWidget(self._hint("Background"))
+        vf = self._form()
+        self.bgstyle = QComboBox()
+        # Labels describe what you SEE; "dim" is avoided as it read as confusing.
+        for key, label in (("dark", "Hidden — solid dark (recommended)"),
+                           ("dimmed", "Faint — heavily darkened"),
+                           ("visible", "Visible — full brightness"),
+                           ("blurred", "Blurred")):
+            self.bgstyle.addItem(label, key)
+        bi = self.bgstyle.findData(cfg.get("vis_bg_style", "dark"))
+        self.bgstyle.setCurrentIndex(bi if bi >= 0 else 0)
+        self.bgstyle.setToolTip("How much of the beatmap's background image shows behind the "
+                                "gameplay. Hidden keeps the comparison clean and distraction-free.")
+        vf.addRow("visibility", self.bgstyle)
+        vl.addLayout(vf)
+        # storyboards/videos are what make the background move; off = a still background.
+        self.nostoryboard = _chk("Freeze background (stop storyboard / video motion)",
+                                 "vis_no_storyboards", False,
+                                 "Some maps have an animated storyboard or background video. "
+                                 "Check this for a still background that won't distract from the play.")
+
+        # --- Cursor ---
+        vl.addWidget(self._hint("Cursor"))
+        cf = self._form()
+        self.cursorsize = self._range_slider(cfg.get("vis_cursor_size", 100), 50, 200)
+        self.traillen = self._range_slider(cfg.get("vis_trail_length", 100), 25, 200)
+        cf.addRow("cursor size", self.cursorsize["w"])
+        cf.addRow("cursor trail", self.traillen["w"])
+        vl.addLayout(cf)
+
+        # --- Effects ---
+        vl.addWidget(self._hint("Effects"))
         self.bloom        = _chk("bloom / glow effect", "vis_bloom", False)
         self.hitlighting  = _chk("hit lighting (flash on each hit)", "vis_hit_lighting", False)
         self.aimerror     = _chk("aim-error scatter meter", "vis_aim_error", False,
@@ -768,13 +957,24 @@ class SettingsDialog(QDialog):
         self.ignsamplevol = _chk("ignore hitsound volume changes", "vis_ignore_sample_volume", False,
                                  "Keep hitsounds at a constant level instead of following the "
                                  "map's per-section volume.")
-        self.nostoryboard = _chk("disable storyboards", "vis_no_storyboards", False)
-        vl.addWidget(self._hint("HUD elements (uncheck to hide). Score + accuracy always show."))
-        self.hud_pp        = _chk("pp counter", "vis_show_pp", True)
+
+        # --- In-game HUD ---
+        vl.addWidget(self._hint("In-game HUD (uncheck to hide). Score + accuracy always show."))
+        self.hud_pp        = _chk("PP counter", "vis_show_pp", True)
         self.hud_hitcounts = _chk("300 / 100 / 50 / miss counts", "vis_show_hitcounts", True)
         self.hud_hiterror  = _chk("hit-error bar", "vis_show_hiterror", True)
         self.hud_keys      = _chk("key overlay", "vis_show_keys", True)
         self.hud_combo     = _chk("combo counter", "vis_show_combo", True)
+        # PP-counter position (also moves the hit counts, which ride just above it).
+        ppf = self._form()
+        self.pp_x = self._slider(cfg.get("vis_pp_x", 86))
+        self.pp_y = self._slider(cfg.get("vis_pp_y", 88))
+        ppf.addRow("PP position — right", self.pp_x["w"])
+        ppf.addRow("PP position — down", self.pp_y["w"])
+        vl.addLayout(ppf)
+        vl.addWidget(self._hint("PP counter position within each gameplay panel: right = 100%, "
+                                "down = 100% is the bottom-right corner. If it ever disappears, "
+                                "lower the slider a little."))
         vl.addStretch(1)
 
         outer.addWidget(tabs, 1)
@@ -853,7 +1053,19 @@ class SettingsDialog(QDialog):
         return {"s": s, "w": w}
 
     def result_config(self) -> dict:
+        # per-player audio for the players shown; preserve any values for players
+        # beyond the current count (e.g. editing with 2 slots keeps P3/P4 settings).
+        music = [m["s"].value() for m in self.vol_music]
+        hits = [h["s"].value() for h in self.vol_hits]
+        old_m = self.cfg.get("player_music") or []
+        old_h = self.cfg.get("player_hits") or []
+        if len(old_m) > len(music):
+            music += list(old_m[len(music):])
+        if len(old_h) > len(hits):
+            hits += list(old_h[len(hits):])
         return {
+            "player_music": music,
+            "player_hits": hits,
             "danser_bin": self.danser_bin.text().strip(),
             "ffmpeg_bin": self.ffmpeg_bin.text().strip(),
             "songs_dir": self.songs.text().strip(),
@@ -868,10 +1080,8 @@ class SettingsDialog(QDialog):
             "quality": self.quality.currentData(),
             "no_fail": self.nofail.isChecked(),
             "force_skin_hits": self.skinhits.isChecked(),
-            "left_music_volume": self.vol_l_music["s"].value(),
-            "left_hitsound_volume": self.vol_l_hit["s"].value(),
-            "right_music_volume": self.vol_r_music["s"].value(),
-            "right_hitsound_volume": self.vol_r_hit["s"].value(),
+            "vis_pp_x": self.pp_x["s"].value(),
+            "vis_pp_y": self.pp_y["s"].value(),
             "master_volume": self.vol_master["s"].value(),
             "vis_bg_style": self.bgstyle.currentData(),
             "vis_cursor_size": self.cursorsize["s"].value(),
@@ -1030,9 +1240,10 @@ class LogRouter:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CircleClash — osu! 1v1 comparison")
+        self.setWindowTitle("CircleClash — osu! replay comparison")
         self.cfg = load_config()
         self.proc: QProcess | None = None
+        self._preview_proc: QProcess | None = None
         self.tracker = ProgressTracker()
         self._raw = []; self._clean = []
         self._cur_phase = None; self._cur_phase_t = None; self._pending = []; self._live = False
@@ -1182,20 +1393,29 @@ class MainWindow(QMainWindow):
 
         # header — gradient wordmark + tagline
         root.addWidget(GradientTitle("CircleClash"))
-        sub = QLabel("drop two replays · get a side-by-side comparison video")
+        sub = QLabel("drop 2–4 replays · get a side-by-side comparison video")
         sub.setStyleSheet(f"color:{MUTED};font-size:13px;")
         root.addWidget(sub)
 
-        # versus row: P1  ·  VS  ·  P2
-        zones = QHBoxLayout(); zones.setSpacing(0)
-        self.leftZone = DropZone("PLAYER 1", PINK, (".osr",), side="left")
-        self.rightZone = DropZone("PLAYER 2", ICE, (".osr",), side="right")
-        self.leftZone.fileDropped.connect(self._refresh_enabled)
-        self.rightZone.fileDropped.connect(self._refresh_enabled)
-        zones.addWidget(self.leftZone, 1)
-        zones.addWidget(VsNode(), 0, Qt.AlignVCenter)
-        zones.addWidget(self.rightZone, 1)
-        root.addLayout(zones)
+        # ---- players toolbar: mode + count + add ----
+        ptools = QHBoxLayout(); ptools.setSpacing(10)
+        modeLab = self._flabel("Mode")
+        self.modeCombo = QComboBox(); self.modeCombo.addItems(["Free-for-all", "2v2 Teams"])
+        self.modeCombo.setToolTip("Free-for-all ranks everyone individually. "
+                                  "2v2 Teams (exactly 4 players) scores two teams.")
+        self.modeCombo.currentIndexChanged.connect(self._on_mode_changed)
+        self.playerCountLabel = QLabel(""); self.playerCountLabel.setStyleSheet(f"color:{MUTED};font-size:12px;")
+        self.addPlayerBtn = QPushButton("+ Add player"); self.addPlayerBtn.clicked.connect(self._add_player_slot)
+        ptools.addWidget(modeLab); ptools.addWidget(self.modeCombo)
+        ptools.addStretch(1)
+        ptools.addWidget(self.playerCountLabel); ptools.addWidget(self.addPlayerBtn)
+        root.addLayout(ptools)
+
+        # ---- dynamic player row (2–4 slots) ----
+        self.playersRow = QHBoxLayout(); self.playersRow.setSpacing(12)
+        root.addLayout(self.playersRow)
+        self.slots: list[PlayerSlot] = []
+        self._add_player_slot(); self._add_player_slot()   # start with two
 
         # ---- control panel ----
         panel = QFrame(); panel.setProperty("role", "panel")
@@ -1206,42 +1426,35 @@ class MainWindow(QMainWindow):
         self.titleEdit = QLineEdit("friendly · bo1")
         meta.addWidget(self.titleEdit, 0, 1, 1, 3)
 
-        meta.addWidget(self._flabel("P1 skin"), 1, 0)
-        self.skinLeft = QComboBox(); self.skinLeft.setEditable(False)
-        bL = QPushButton("Import .osk"); bL.setMinimumWidth(120)
-        bL.clicked.connect(lambda: self.import_osk("left"))
-        rowL = QHBoxLayout(); rowL.setSpacing(8)
-        rowL.addWidget(self.skinLeft, 1); rowL.addWidget(bL, 0)
-        meta.addLayout(rowL, 1, 1, 1, 3)
-
-        meta.addWidget(self._flabel("P2 skin"), 2, 0)
-        self.skinRight = QComboBox(); self.skinRight.setEditable(False)
-        bR = QPushButton("Import .osk"); bR.setMinimumWidth(120)
-        bR.clicked.connect(lambda: self.import_osk("right"))
-        rowR = QHBoxLayout(); rowR.setSpacing(8)
-        rowR.addWidget(self.skinRight, 1); rowR.addWidget(bR, 0)
-        meta.addLayout(rowR, 2, 1, 1, 3)
-
-        meta.addWidget(self._flabel("Resolution"), 3, 0)
+        meta.addWidget(self._flabel("Resolution"), 1, 0)
         self.resCombo = QComboBox(); self.resCombo.addItems(["720p", "1080p", "1440p", "4k"])
         self.resCombo.setCurrentText(self.cfg.get("resolution", "1080p"))
-        meta.addWidget(self.resCombo, 3, 1)
-        meta.addWidget(self._flabel("FPS"), 3, 2)
+        meta.addWidget(self.resCombo, 1, 1)
+        meta.addWidget(self._flabel("FPS"), 1, 2)
         self.fpsCombo = QComboBox(); self.fpsCombo.addItems(["30", "60", "120", "240"])
         self.fpsCombo.setCurrentText(str(self.cfg.get("fps", 60)))
-        meta.addWidget(self.fpsCombo, 3, 3)
+        meta.addWidget(self.fpsCombo, 1, 3)
         meta.setColumnStretch(1, 1)
         proot.addLayout(meta)
 
         # buttons row
         btns = QHBoxLayout()
         self.settingsBtn = QPushButton("⚙  Settings"); self.settingsBtn.clicked.connect(self.open_settings)
+        # Preview: render just the overlay frame or results card to a still (seconds,
+        # no danser/ffmpeg) so you can check names/skins/colours before a full render.
+        self.previewBtn = QPushButton("👁  Preview")
+        self.previewBtn.setToolTip("Render just the overlay frame or results card to a quick still image "
+                                   "(no gameplay) so you can check it before a full render.")
+        previewMenu = QMenu(self.previewBtn)
+        previewMenu.addAction("Overlay frame", lambda: self.start_preview("overlay"))
+        previewMenu.addAction("Results card", lambda: self.start_preview("endcard"))
+        self.previewBtn.setMenu(previewMenu)
         self.renderBtn = QPushButton("▶  Render"); self.renderBtn.clicked.connect(self.start_render)
         self.renderBtn.setProperty("role", "primary")
         self.cancelBtn = QPushButton("Cancel"); self.cancelBtn.clicked.connect(self.cancel_render); self.cancelBtn.setEnabled(False)
         self.openBtn = QPushButton("Open output folder"); self.openBtn.clicked.connect(self.open_output)
         btns.addWidget(self.settingsBtn); btns.addStretch(1)
-        btns.addWidget(self.openBtn); btns.addWidget(self.cancelBtn); btns.addWidget(self.renderBtn)
+        btns.addWidget(self.openBtn); btns.addWidget(self.previewBtn); btns.addWidget(self.cancelBtn); btns.addWidget(self.renderBtn)
         proot.addLayout(btns)
 
         # progress + status
@@ -1294,35 +1507,89 @@ class MainWindow(QMainWindow):
             self.resize(self.width(), getattr(self, "_pre_log_h", self.height()))
 
     def open_settings(self):
-        dlg = SettingsDialog(self.cfg, self)
+        dlg = SettingsDialog(self.cfg, self, player_count=len(self.slots))
         if dlg.exec() == QDialog.Accepted:
             self.cfg.update(dlg.result_config())
             save_config(self.cfg)
             self.populate_skins()
             self._refresh_enabled()
 
+    # ---- dynamic player slots ----
+    def _add_player_slot(self):
+        if len(self.slots) >= 4:
+            return
+        slot = PlayerSlot(len(self.slots))
+        slot.changed.connect(self._refresh_enabled)
+        slot.removeRequested.connect(self._remove_player_slot)
+        slot.importRequested.connect(self.import_osk_for)
+        self.slots.append(slot)
+        self.playersRow.addWidget(slot, 1)
+        self._fill_skin_combo(slot.skin)
+        self._sync_player_ui()
+
+    def _remove_player_slot(self, slot: "PlayerSlot"):
+        if len(self.slots) <= 2:
+            return
+        self.slots.remove(slot)
+        self.playersRow.removeWidget(slot)
+        slot.setParent(None); slot.deleteLater()
+        for i, s in enumerate(self.slots):
+            s.reindex(i)
+        self._sync_player_ui()
+
+    def _on_mode_changed(self, *_):
+        team = self.modeCombo.currentIndex() == 1
+        for s in self.slots:
+            s.set_team_visible(team)
+        self._refresh_enabled()
+
+    def _sync_player_ui(self):
+        """Keep the toolbar, team toggles and remove buttons consistent with the count."""
+        n = len(self.slots)
+        self.playerCountLabel.setText(f"{n} player{'s' if n != 1 else ''}")
+        self.addPlayerBtn.setEnabled(n < 4)
+        # 2v2 teams need exactly four players; disable the option (and revert) otherwise.
+        team_ok = (n == 4)
+        item = self.modeCombo.model().item(1)
+        item.setEnabled(team_ok)
+        if not team_ok and self.modeCombo.currentIndex() == 1:
+            self.modeCombo.setCurrentIndex(0)
+        team_mode = self.modeCombo.currentIndex() == 1
+        for s in self.slots:
+            s.set_team_visible(team_mode)
+            s.set_removable(n > 2)
+        self._refresh_enabled()
+
     def _skins_root(self) -> Path | None:
         d = self.cfg.get("skins_dir")
         return Path(d) if d and Path(d).is_dir() else None
 
-    def populate_skins(self):
-        """Fill both skin dropdowns from the configured skins folder."""
+    def _skin_names(self) -> list[str]:
         root = self._skins_root()
-        names = []
-        if root:
-            names = sorted([p.name for p in root.iterdir() if p.is_dir()], key=str.lower)
-        for combo in (self.skinLeft, self.skinRight):
-            cur = combo.currentText()
-            combo.blockSignals(True)
-            combo.clear()
-            combo.addItem("(default skin)")
-            combo.addItems(names)
-            if cur and cur in names:
-                combo.setCurrentText(cur)
-            combo.blockSignals(False)
+        if not root:
+            return []
+        return sorted([p.name for p in root.iterdir() if p.is_dir()], key=str.lower)
 
-    def import_osk(self, side: str):
-        """Extract a .osk into the skins folder, then select it for this side."""
+    def _fill_skin_combo(self, combo: QComboBox, names: list[str] | None = None):
+        if names is None:
+            names = self._skin_names()
+        cur = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("(default skin)")
+        combo.addItems(names)
+        if cur and cur in names:
+            combo.setCurrentText(cur)
+        combo.blockSignals(False)
+
+    def populate_skins(self):
+        """Refill every player's skin dropdown from the configured skins folder."""
+        names = self._skin_names()
+        for s in self.slots:
+            self._fill_skin_combo(s.skin, names)
+
+    def import_osk_for(self, slot: "PlayerSlot"):
+        """Extract a .osk into the skins folder, then select it for this player."""
         root = self._skins_root()
         if not root:
             QMessageBox.information(self, "Set a skins folder",
@@ -1339,33 +1606,162 @@ class MainWindow(QMainWindow):
             with zipfile.ZipFile(f) as z:
                 z.extractall(dest)
             self.populate_skins()
-            (self.skinLeft if side == "left" else self.skinRight).setCurrentText(name)
+            slot.skin.setCurrentText(name)
         except Exception as e:
             QMessageBox.warning(self, "Skin error", f"Could not import skin:\n{e}")
 
-    def _skin_for(self, combo) -> str | None:
-        t = combo.currentText()
-        return None if (not t or t.startswith("(default")) else t
+    def _team_mode(self) -> bool:
+        return self.modeCombo.currentIndex() == 1 and len(self.slots) == 4
+
+    def _sync_warning(self) -> str | None:
+        """If the loaded replays run at different speeds they can't stay in sync.
+        Detect it here so the user sees it immediately instead of a failed render."""
+        if not (parse_replay and speed_multiplier):
+            return None
+        seen = {}
+        for s in self.slots:
+            if not s.path:
+                continue
+            try:
+                info = parse_replay(s.path)
+                seen[round(speed_multiplier(info.mods), 3)] = info.mods_str or "NoMod"
+            except Exception:
+                continue
+        if len(seen) > 1:
+            return ("different speed mods (" + " vs ".join(sorted(set(seen.values())))
+                    + ") — can't sync; use matching speeds")
+        return None
 
     def _refresh_enabled(self, *_):
-        ready = bool(self.leftZone.path and self.rightZone.path and self._have_danser())
-        self.renderBtn.setEnabled(ready and self.proc is None)
+        if not hasattr(self, "renderBtn"):
+            return                     # slots can be created before the buttons exist
+        filled = len(self.slots) >= 2 and all(s.path for s in self.slots)
+        idle = self.proc is None and getattr(self, "_preview_proc", None) is None
+        warn = self._sync_warning() if filled else None
+        self.renderBtn.setEnabled(filled and self._have_danser() and idle and not warn)
+        # Preview is chrome/results only (no gameplay), so speed mismatch doesn't block it.
+        self.previewBtn.setEnabled(filled and idle)
+        if idle and hasattr(self, "status"):
+            if warn:
+                self.status.setText("⚠ " + warn)
+            elif self.status.text().startswith("⚠"):
+                self.status.setText("Ready")
+
+    def _player_name(self, path: str) -> str:
+        if parse_replay:
+            try:
+                return parse_replay(path).player
+            except Exception:
+                pass
+        return Path(path).stem
 
     def _out_path(self) -> Path:
-        lname = rname = None
-        if parse_replay:
-            try: lname = parse_replay(self.leftZone.path).player
-            except Exception: pass
-            try: rname = parse_replay(self.rightZone.path).player
-            except Exception: pass
-        lname = lname or Path(self.leftZone.path).stem
-        rname = rname or Path(self.rightZone.path).stem
+        names = [self._player_name(s.path) for s in self.slots]
         title = _sanitize(self.titleEdit.text())
-        fname = _sanitize(f"{lname} vs {rname} - {title}") + ".mp4"
+        fname = _sanitize(f"{' vs '.join(names)} - {title}") + ".mp4"
         return Path(self.cfg["output_dir"]) / fname
 
+    def _replay_args(self) -> list[str]:
+        """Positional replays + mode/teams/skins shared by preview and full render."""
+        args = [s.path for s in self.slots]
+        if self._team_mode():
+            args += ["--mode", "team", "--teams", *[str(s.team) for s in self.slots]]
+        skins = [s.skin_name() or "-" for s in self.slots]
+        if any(x != "-" for x in skins):
+            args += ["--skins", *skins]
+        return args
+
+    def _pipeline_env(self) -> QProcessEnvironment:
+        """Environment shared by the full render and the quick preview: forces UTF-8
+        stdio (Windows pipes default to cp1252) and passes any osu! API creds through."""
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONUNBUFFERED", "1")
+        env.insert("PYTHONUTF8", "1")
+        env.insert("PYTHONIOENCODING", "utf-8")
+        if self.cfg.get("api_client_id"):
+            env.insert("OSU_CLIENT_ID", self.cfg["api_client_id"])
+        if self.cfg.get("api_client_secret"):
+            env.insert("OSU_CLIENT_SECRET", self.cfg["api_client_secret"])
+        return env
+
+    def start_preview(self, mode: str = "overlay"):
+        """Render just the overlay frame (--chrome-only) or the results card
+        (--endcard-preview) to a still image, with no danser/ffmpeg gameplay pass —
+        a few seconds of feedback before committing to a full render."""
+        if self.proc is not None or self._preview_proc is not None:
+            return
+        if not all(s.path for s in self.slots):
+            QMessageBox.information(self, "Add replays", "Drop a replay on every player slot first.")
+            return
+
+        preview_dir = config_dir() / "preview"
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        cache = preview_dir / "cache"
+        if mode == "endcard":
+            out_png = preview_dir / "endcard_preview.png"   # pipeline's fixed name
+            extra = ["--endcard-preview"]
+            label = "results card"
+        else:
+            out_png = preview_dir / "overlay_base.png"
+            extra = ["--png", str(out_png), "--chrome-only"]
+            label = "overlay frame"
+        self._preview_png = out_png
+        self._preview_label = label
+        try:
+            if out_png.exists():
+                out_png.unlink()                            # so a stale still can't be shown
+        except Exception:
+            pass
+
+        pargs = [
+            *self._replay_args(),
+            "--title", self.titleEdit.text() or "friendly · bo1",
+            "--cache", str(cache),
+            *extra,
+        ]
+
+        if getattr(sys, "frozen", False):
+            launch = ["--run-pipeline", *pargs]
+        else:
+            launch = ["-u", str(PIPELINE), *pargs]
+
+        self._preview_proc = QProcess(self)
+        self._preview_proc.setProcessEnvironment(self._pipeline_env())
+        self._preview_proc.setWorkingDirectory(str(preview_dir))
+        self._preview_proc.setProcessChannelMode(QProcess.MergedChannels)
+        self._preview_out = []
+        self._preview_proc.readyReadStandardOutput.connect(
+            lambda: self._preview_out.append(
+                bytes(self._preview_proc.readAllStandardOutput()).decode(errors="replace")))
+        self._preview_proc.finished.connect(self._on_preview_finished)
+        self.status.setText(f"Rendering {label} preview…")
+        self.progress.setRange(0, 0)                        # busy indicator
+        self._preview_proc.start(sys.executable, launch)
+        self._refresh_enabled()
+        self.settingsBtn.setEnabled(False)
+
+    def _on_preview_finished(self, code, _status):
+        self._preview_proc = None
+        self.progress.setRange(0, 100); self.progress.setValue(0)
+        self.settingsBtn.setEnabled(True)
+        self._refresh_enabled()
+        png = getattr(self, "_preview_png", None)
+        if code == 0 and png and png.exists():
+            self.status.setText(f"{self._preview_label.capitalize()} preview ready")
+            PreviewDialog(png, self._preview_label, self).exec()
+        else:
+            self.status.setText("Preview failed — see details")
+            log = "".join(getattr(self, "_preview_out", [])).strip() or "(no output)"
+            box = QMessageBox(QMessageBox.Warning, "Preview failed",
+                              f"Couldn't render the {getattr(self, '_preview_label', 'preview')}.\n\n"
+                              "This usually means Playwright's Chromium isn't installed "
+                              "(run: playwright install chromium), or the two replays are on "
+                              "different beatmaps.", QMessageBox.Ok, self)
+            box.setDetailedText(log[-4000:])
+            box.exec()
+
     def start_render(self):
-        if self.proc is not None:
+        if self.proc is not None or self._preview_proc is not None:
             return
         # capture current main-window selections into config
         self.cfg["resolution"] = self.resCombo.currentText()
@@ -1373,11 +1769,12 @@ class MainWindow(QMainWindow):
         save_config(self.cfg)
 
         out = self._out_path()
-        # Resolve danser + ffmpeg preferring the copy in THIS folder's data dir, so the
-        # app is fully self-contained wherever it's placed. config.json is shared per-user,
-        # so a stored absolute path can point at a different/old copy; the local managed
-        # copy (next to the running exe) is the source of truth, with the stored path only
-        # as a fallback for a manually-chosen custom binary.
+        # Resolve danser + ffmpeg. Normally the managed copy in THIS folder's data dir is
+        # the source of truth, so the app stays self-contained wherever it's placed. BUT if
+        # the user has deliberately pointed Settings at a *different* binary that exists
+        # (e.g. a system ffmpeg that has working NVENC when the bundled one doesn't), honour
+        # that explicit choice. A stored path that no longer exists falls back to the managed
+        # copy, which keeps the staleness guard for moved/portable installs.
         def _resolve_tool(cfg_key, find_local):
             local = None
             if find_local:
@@ -1387,7 +1784,12 @@ class MainWindow(QMainWindow):
                 except Exception:
                     local = None
             stored = self.cfg.get(cfg_key, "")
-            chosen = local or (stored if stored and Path(stored).exists() else "")
+            stored_ok = bool(stored and Path(stored).exists())
+            custom = stored_ok and (not local or Path(stored).resolve() != Path(local).resolve())
+            if custom:
+                chosen = stored                 # honour the user's explicit override
+            else:
+                chosen = local or (stored if stored_ok else "")
             if chosen and chosen != stored:
                 self.cfg[cfg_key] = chosen
                 save_config(self.cfg)
@@ -1403,7 +1805,7 @@ class MainWindow(QMainWindow):
         # is just a source for maps they already own.
         render_songs = str(danser_setup.render_songs_dir()) if danser_setup else self.cfg.get("songs_dir", "")
         pargs = [
-            self.leftZone.path, self.rightZone.path,
+            *self._replay_args(),
             "--title", self.titleEdit.text() or "friendly · bo1",
             "--danser-bin", danser_bin,
             "--out", str(out),
@@ -1412,12 +1814,12 @@ class MainWindow(QMainWindow):
             "--endcard-speed", str(self.cfg.get("endcard_speed", 1.0)),
             "--resolution", self.cfg["resolution"],
             "--fps", str(self.cfg["fps"]),
-            "--left-music-volume", str(self.cfg.get("left_music_volume", self.cfg.get("music_volume", 100)) / 100),
-            "--right-music-volume", str(self.cfg.get("right_music_volume", 0) / 100),
-            "--left-hitsound-volume", str(self.cfg.get("left_hitsound_volume", self.cfg.get("hitsound_volume", 100)) / 100),
-            "--right-hitsound-volume", str(self.cfg.get("right_hitsound_volume", self.cfg.get("hitsound_volume", 100)) / 100),
             "--master-volume", str(self.cfg.get("master_volume", 100) / 100),
         ]
+        # per-player audio, one value per slot (0-1)
+        nps = len(self.slots)
+        pargs += ["--player-music", *[f"{player_music_vol(self.cfg, i) / 100:g}" for i in range(nps)]]
+        pargs += ["--player-hits", *[f"{player_hits_vol(self.cfg, i) / 100:g}" for i in range(nps)]]
         if render_songs:
             pargs += ["--songs-dir", render_songs]
         if ffmpeg_bin:
@@ -1426,12 +1828,7 @@ class MainWindow(QMainWindow):
             pargs += ["--library-dir", self.cfg["songs_dir"]]
         if self.cfg.get("skins_dir"):
             pargs += ["--skins-dir", self.cfg["skins_dir"]]
-        sl = self._skin_for(self.skinLeft)
-        sr = self._skin_for(self.skinRight)
-        if sl:
-            pargs += ["--left-skin", sl]
-        if sr:
-            pargs += ["--right-skin", sr]
+        # per-player skins are carried in _replay_args() via --skins
         enc = self.cfg.get("encoder") or ("nvenc_h264" if self.cfg.get("nvenc") else "x264")
         pargs += ["--encoder", enc, "--quality", self.cfg.get("quality", "high")]
         if not self.cfg.get("no_fail", True):
@@ -1447,7 +1844,9 @@ class MainWindow(QMainWindow):
         }.get(c.get("vis_bg_style", "dark"), (0.95, 0.0))
         pargs += ["--bg-dim", str(bg_dim), "--bg-blur", str(bg_blur),
                   "--cursor-size", str(round(12 * c.get("vis_cursor_size", 100) / 100, 2)),
-                  "--trail-length", str(round(c.get("vis_trail_length", 100) / 100, 3))]
+                  "--trail-length", str(round(c.get("vis_trail_length", 100) / 100, 3)),
+                  "--pp-x", str(round(c.get("vis_pp_x", 86) / 100, 3)),
+                  "--pp-y", str(round(c.get("vis_pp_y", 88) / 100, 3))]
         for flag, key in (("--no-storyboards", "vis_no_storyboards"),
                           ("--bloom", "vis_bloom"), ("--hit-lighting", "vis_hit_lighting"),
                           ("--aim-error", "vis_aim_error"), ("--pp-components", "vis_pp_components"),
